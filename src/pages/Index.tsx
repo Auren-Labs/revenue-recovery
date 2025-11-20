@@ -6,6 +6,8 @@ import SolutionSection from "@/components/SolutionSection";
 import ROISection from "@/components/ROISection";
 import TestimonialsSection from "@/components/TestimonialsSection";
 import FAQSection from "@/components/FAQSection";
+import CalBookingSection from "@/components/CalBookingSection";
+import WaitlistFormSection from "@/components/WaitlistFormSection";
 import PricingSection from "@/components/PricingSection";
 import Footer from "@/components/Footer";
 
@@ -22,6 +24,8 @@ const Index = () => {
         <TestimonialsSection />
         <FAQSection />
         <PricingSection />
+        <CalBookingSection />
+        <WaitlistFormSection />
       </main>
       <Footer />
     </div>

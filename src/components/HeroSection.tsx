@@ -1,14 +1,9 @@
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { ArrowRight, Building2, Briefcase, ServerCog, Check } from "lucide-react";
-import { useRef, useState } from "react";
-import { toast } from "sonner";
+import { Building2, Briefcase, ServerCog } from "lucide-react";
 import heroVisual from "@/assets/hero-visual.jpg";
 import { motion } from "framer-motion";
 
 const HeroSection = () => {
-  const [email, setEmail] = useState("");
-  const emailInputRef = useRef<HTMLInputElement | null>(null);
   const heroStats = [
     { label: "Price escalations", value: "3.4% leakage" },
     { label: "Volume tiers", value: "2.1% leakage" },
@@ -20,12 +15,9 @@ const HeroSection = () => {
     "⏱️ Next cohort starts in 2 weeks",
   ];
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (email) {
-      toast.success("Thank you! You've been added to the waitlist.");
-      setEmail("");
-    }
+  const scrollToForm = () => {
+    const formElement = document.getElementById("waitlist-form");
+    formElement?.scrollIntoView({ behavior: "smooth" });
   };
 
   return (
@@ -64,45 +56,6 @@ const HeroSection = () => {
               </p>
             </div>
 
-            {/* Email Capture Form */}
-            <motion.div
-              className="max-w-xl rounded-2xl border border-border/80 bg-card/90 backdrop-blur p-6 shadow-card space-y-4"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.25, duration: 0.6 }}
-            >
-              <p className="text-sm font-semibold text-primary uppercase tracking-widest">Get Your Free Revenue Leakage Report</p>
-              <p className="text-sm text-muted-foreground">
-                See how much you're likely losing, benchmark against peers, and get early access pricing (50% off for the first 50 customers).
-              </p>
-              <form onSubmit={handleSubmit} className="flex flex-col sm:flex-row gap-3">
-                <Input
-                  ref={emailInputRef}
-                  type="email"
-                  placeholder="Enter your work email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  required
-                  className="flex-1 h-12 text-base bg-background/70"
-                />
-                <Button type="submit" variant="cta" size="lg" className="whitespace-nowrap shadow-lg shadow-cta/30">
-                  Get My Report
-                  <ArrowRight className="ml-2 h-4 w-4" />
-                </Button>
-              </form>
-              <div className="grid sm:grid-cols-3 gap-3 text-sm text-foreground">
-                {["See leakage instantly", "Industry benchmarks", "No credit card required"].map((item) => (
-                  <div key={item} className="flex items-center gap-2 text-muted-foreground">
-                    <Check className="h-4 w-4 text-success" />
-                    <span>{item}</span>
-                  </div>
-                ))}
-              </div>
-              <p className="text-xs text-muted-foreground">
-                We'll also send you early access details. First 50 customers lock in $499/mo forever.
-              </p>
-            </motion.div>
-
             <div className="grid sm:grid-cols-3 gap-4">
               {heroStats.map((stat) => (
                 <motion.div
@@ -131,12 +84,7 @@ const HeroSection = () => {
                     <span key={point}>{point}</span>
                   ))}
                 </div>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className="w-full md:w-auto"
-                  onClick={() => emailInputRef.current?.focus()}
-                >
+                <Button variant="secondary" size="sm" className="w-full md:w-auto" onClick={scrollToForm}>
                   Join Waitlist
                 </Button>
               </div>
