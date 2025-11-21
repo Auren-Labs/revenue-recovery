@@ -1,0 +1,22 @@
+Invoice_Date,Due_Date,Invoice_No,Customer,Item_Desc,Qty,Rate,Amount,Memo
+2024-01-01,2024-01-31,INV-2024-001,Acme Cloud,Enterprise SaaS Platform - Jan 2024,1,18000,18000,Recurring subscription
+2024-01-01,2024-01-31,INV-2024-001,Acme Cloud,Implementation wrap-up hours,12,250,3000,Professional services
+2024-02-01,2024-03-02,INV-2024-002,Acme Cloud,Enterprise SaaS Platform - Feb 2024,1,18000,18000,Recurring subscription (should escalate)
+2024-02-01,2024-03-02,INV-2024-002,Acme Cloud,Premium Support Add-On,1,1800,1800,Support plan
+2024-03-01,2024-03-31,INV-2024-003,Acme Cloud,Enterprise SaaS Platform - Mar 2024,1,18000,18000,Recurring subscription (still flat)
+2024-03-01,2024-03-31,INV-2024-003,Acme Cloud,Usage overage credits,1,-350,-350,Credit memo
+2024-04-01,2024-05-01,INV-2024-004,Acme Cloud,Enterprise SaaS Platform - Apr 2024,1,18900,18900,CPI applied after escalation
+2024-04-01,2024-05-01,INV-2024-004,Acme Cloud,Premium Support Add-On,1,1890,1890,Support plan escalated
+2024-01-05,2024-02-04,INV-2024-005,BrightOps,SaaS Platform License - Tier 250,1,8400,8400,Contracted floor is $9000
+2024-01-05,2024-02-04,INV-2024-005,BrightOps,Implementation Retainer,10,110,1100,Fixed fee
+2024-02-05,2024-03-06,INV-2024-006,BrightOps,SaaS Platform License - Tier 250,1,8600,8600,Still below contractual rate
+2024-02-05,2024-03-06,INV-2024-006,BrightOps,Usage burst hours,5,200,1000,Variable fee
+2024-03-05,2024-04-04,INV-2024-007,BrightOps,SaaS Platform License - Tier 250,1,9000,9000,Corrected to floor price
+2024-03-05,2024-04-04,INV-2024-007,BrightOps,Usage burst hours,8,200,1600,Variable fee
+2024-01-12,2024-02-11,INV-2024-008,NodeLogic,Enterprise Platform License,1,12500,12500,Recurring platform fee
+2024-01-12,2024-02-11,INV-2024-008,NodeLogic,Service credit adjustment,1,-500,-500,SLA credit issued
+2024-02-12,2024-03-13,INV-2024-009,NodeLogic,Enterprise Platform License,1,12500,12500,Recurring platform fee (should escalate)
+2024-02-12,2024-03-13,INV-2024-009,NodeLogic,Service credit adjustment,1,0,0,No credits issued despite SLA breach
+2024-03-12,2024-04-11,INV-2024-010,NodeLogic,Enterprise Platform License,1,13125,13125,CPI uplift applied (5%)
+2024-03-12,2024-04-11,INV-2024-010,NodeLogic,Analytics Module Add-On,1,2250,2250,Modular add-on
+
