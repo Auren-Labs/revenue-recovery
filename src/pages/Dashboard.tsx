@@ -223,10 +223,24 @@ const teamStats = [
   { label: "Avg resolution time", value: "2.3 days" },
 ];
 
-const formatCurrency = (value: number | undefined, options?: Intl.NumberFormatOptions) =>
-  new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0, ...options }).format(
-    value ?? 0,
-  );
+// 🔥 Enhanced currency formatter that uses the contract's currency
+const formatCurrency = (value: number | undefined, currencyCode?: string, options?: Intl.NumberFormatOptions) => {
+  const currency = currencyCode || "INR"; // Default to INR
+  const symbols: Record<string, string> = {
+    'INR': '₹',
+    'USD': '$',
+    'EUR': '€',
+    'GBP': '£'
+  };
+  
+  const symbol = symbols[currency] || currency;
+  const formattedNumber = new Intl.NumberFormat("en-US", { 
+    maximumFractionDigits: 0, 
+    ...options 
+  }).format(value ?? 0);
+  
+  return `${symbol}${formattedNumber}`;
+};
 
 const truncate = (text: string | undefined, length = 140) => {
   if (!text) return "";
@@ -276,6 +290,11 @@ const Dashboard = () => {
   }, [jobId]);
 
   const metrics = (analysis?.job.metrics ?? {}) as JobMetrics;
+  // 🔥 ADD THIS: Extract currency from GPT-4o rules
+  const contractCurrency = (metrics.gpt4o_rules as any)?.currency || 
+  (metrics as any)?.currency || 
+  "INR";
+  
   const billingSummary: BillingSummary = metrics.billing_summary ?? {
     total_billed: 0,
     invoice_count: 0,
@@ -324,7 +343,7 @@ const Dashboard = () => {
     return [
       {
         label: "Recoverable revenue",
-        value: formatCurrency(recoverableAmount, { maximumFractionDigits: 0 }),
+        value: formatCurrency(recoverableAmount, contractCurrency),
         delta: `Based on ${billingSummary.invoice_count ?? 0} invoices`,
         icon: Zap,
       },
@@ -350,7 +369,7 @@ const Dashboard = () => {
       },
       {
         label: "Recovery in progress",
-        value: formatCurrency(billingSummary.total_billed ?? 0, { maximumFractionDigits: 0 }),
+        value: formatCurrency(recoverableAmount, contractCurrency), // 🔥 FIX: Use recoverable, not total_billed
         delta: `${billingSummary.customers?.length ?? 0} customers billed`,
         icon: CircleCheck,
       },
@@ -386,7 +405,7 @@ const Dashboard = () => {
       id: `${alert.customer ?? "unknown"}-${alert.issue ?? idx}`,
       customer: alert.customer ?? "Unknown customer",
       issue: alert.issue ?? "Issue pending triage",
-      value: formatCurrency(alert.value ?? 0, { maximumFractionDigits: 0 }),
+      value: formatCurrency(alert.value ?? 0, contractCurrency),
       due: alert.due ?? "No due date",
       priority: (alert.priority ?? "medium").toLowerCase(),
       evidence: alert.evidence ?? [],
@@ -413,6 +432,12 @@ const Dashboard = () => {
     }),
     [],
   );
+
+  const evidenceSectionRef = useRef<HTMLDivElement | null>(null);
+
+  const scrollToEvidence = () => {
+    evidenceSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -470,12 +495,12 @@ const Dashboard = () => {
               </div>
               <p className="text-3xl font-bold text-foreground">{metric.value}</p>
               <p className="text-xs text-muted-foreground">{metric.delta}</p>
-              {metric.label === "AI extractions" && clauseHits > 0 && (
-                <Button variant="ghost" size="sm" className="gap-2 text-cta p-0 h-auto">
+              {metric.label === "AI extractions" && clauseHits > 0 && metrics.llm_insights?.length ? (
+                <Button variant="ghost" size="sm" className="gap-2 text-cta p-0 h-auto" onClick={scrollToEvidence}>
                   <TriangleAlert className="h-4 w-4" />
                   Review AI insights
                 </Button>
-              )}
+              ) : null}
             </div>
           ))}
         </section>
@@ -663,8 +688,8 @@ const Dashboard = () => {
                             {item.text && <p className="italic">“{item.text}”</p>}
                             <p>
                               {item.amount !== undefined && (
-                                <span>{formatCurrency(item.amount, { maximumFractionDigits: 0 })} • </span>
-                              )}
+                                  <span>{formatCurrency(item.amount, contractCurrency)} • </span>
+                                )}
                               {item.period && <span>{item.period} • </span>}
                               {item.file && <span>Source: {item.file}</span>}
                             </p>
@@ -706,7 +731,7 @@ const Dashboard = () => {
           </div>
         </section>
 
-        <section className="grid gap-6 lg:grid-cols-2">
+        <section ref={evidenceSectionRef} className="grid gap-6 lg:grid-cols-2">
           <div className="rounded-3xl border border-border bg-card/90 shadow-hover p-6 space-y-4">
             <div className="flex items-center justify-between">
               <div>
@@ -728,7 +753,7 @@ const Dashboard = () => {
             </div>
             <p className="text-sm text-muted-foreground">
               {primaryDiscrepancy
-                ? `${formatCurrency(primaryDiscrepancy.value ?? 0)} at risk. ${primaryDiscrepancy.issue}.`
+                ? `${formatCurrency(primaryDiscrepancy.value ?? 0, contractCurrency)} at risk. ${primaryDiscrepancy.issue}.`
                 : "No discrepancies at the moment. Stay proactive by scheduling periodic audits."}
             </p>
             <div className="flex flex-wrap gap-3">
@@ -887,7 +912,7 @@ const Dashboard = () => {
                   <div key={customer.customer} className="rounded-2xl border border-border/70 p-4">
                     <p className="text-sm font-semibold text-foreground">{customer.customer}</p>
                     <p className="text-xs text-muted-foreground">
-                      {customer.invoice_count} invoices • {formatCurrency(customer.total)}
+                      {customer.invoice_count} invoices • {formatCurrency(customer.total, contractCurrency)}
                     </p>
                   </div>
                 ))

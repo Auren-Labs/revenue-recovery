@@ -43,6 +43,13 @@ const stageLabels: Record<Stage, { title: string; description: string; icon: Rea
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 
+const stageOrder: Stage[] = ["upload", "document_extraction", "llm_extraction", "reconciliation"];
+
+type ReconProgress = {
+  percent?: number;
+  message?: string;
+};
+
 const UploadPage = () => {
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [vendorName, setVendorName] = useState("");
@@ -52,6 +59,7 @@ const UploadPage = () => {
   const [isUploading, setIsUploading] = useState(false);
   const [currentStage, setCurrentStage] = useState<Stage | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [reconProgress, setReconProgress] = useState<ReconProgress | null>(null);
   const navigate = useNavigate();
 
   const onDropContracts = useCallback((acceptedFiles: File[]) => {
@@ -114,6 +122,7 @@ const UploadPage = () => {
         const data = await res.json();
         setJobId(data.job_id);
         setStep(2);
+        setReconProgress(null);
         setMessage(null);
       } else if (step === 2 && billingFiles.length && jobId) {
         const formData = new FormData();
@@ -137,6 +146,7 @@ const UploadPage = () => {
     setStep(3);
     setIsUploading(true);
     setCurrentStage("upload");
+    setReconProgress(null);
     try {
       const res = await fetch(`${API_BASE}/upload/${job}/submit`, { method: "POST" });
       if (!res.ok) {
@@ -151,14 +161,19 @@ const UploadPage = () => {
           (data.stages.find((s: any) => s.status === "in_progress")?.name ??
             data.stages.find((s: any) => s.status === "pending")?.name) as Stage | undefined;
         if (activeStage) setCurrentStage(activeStage);
+        if (data.metrics?.reconciliation_progress) {
+          setReconProgress(data.metrics.reconciliation_progress);
+        }
         if (data.status === "completed") {
           setIsUploading(false);
           setCurrentStage(null);
           setMessage("Audit complete. Redirecting to dashboard...");
+          setReconProgress(null);
           setTimeout(() => navigate(`/dashboard?job=${job}`), 1500);
         } else if (data.status === "failed") {
           setIsUploading(false);
           setMessage(data.message || "Audit failed. Please retry.");
+          setReconProgress(null);
         } else {
           setTimeout(poll, 2500);
         }
@@ -322,8 +337,11 @@ const UploadPage = () => {
             <div className="w-full space-y-3">
               {(Object.keys(stageLabels) as Stage[]).map((stage) => {
                 const Icon = stageLabels[stage].icon;
+                const currentIndex = currentStage ? stageOrder.indexOf(currentStage) : -1;
+                const stageIndex = stageOrder.indexOf(stage);
                 const isActive = currentStage === stage;
-                const isDone = currentStage && stage !== currentStage;
+                const isDone = currentIndex !== -1 && stageIndex !== -1 && stageIndex < currentIndex;
+                const statusLabel = isActive ? "In progress..." : isDone ? "Complete" : "Queued";
                 return (
                   <div key={stage} className="flex items-center gap-3 text-sm text-muted-foreground">
                     <div className="h-10 w-10 rounded-full bg-secondary/60 flex items-center justify-center">
@@ -333,8 +351,22 @@ const UploadPage = () => {
                       <p className="font-semibold text-foreground">{stageLabels[stage].title}</p>
                       <p className="text-xs text-muted-foreground">{stageLabels[stage].description}</p>
                     </div>
-                    <div className="text-xs text-primary font-semibold">
-                      {isActive ? "In progress..." : isDone ? "Complete" : "Queued"}
+                    <div className="flex-1 text-right text-xs text-primary font-semibold">
+                      {stage === "reconciliation" && isActive && reconProgress ? (
+                        <div className="w-full">
+                          <div className="w-full h-2 bg-secondary/40 rounded-full overflow-hidden">
+                            <div
+                              className="h-full bg-primary transition-all"
+                              style={{
+                                width: `${Math.min(100, Math.max(0, Math.round((reconProgress.percent ?? 0) * 100)))}%`,
+                              }}
+                            />
+                          </div>
+                          <p className="text-[11px] text-muted-foreground mt-2">{reconProgress.message}</p>
+                        </div>
+                      ) : (
+                        statusLabel
+                      )}
                     </div>
                   </div>
                 );

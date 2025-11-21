@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import sys
+import asyncio
 from pathlib import Path
 import tempfile
 from typing import List
@@ -76,7 +77,16 @@ async def upload_files(files: List[tuple[str, bytes]], prefix: str) -> List[str]
     stored_paths = []
     for filename, data in files:
         path = f"{prefix}/{uuid4()}-{filename}"
-        client.storage.from_(bucket).upload(path, data, file_options={"contentType": "application/octet-stream"})
+
+        async def _upload(p: str, payload: bytes) -> None:
+            await asyncio.to_thread(
+                client.storage.from_(bucket).upload,
+                p,
+                payload,
+                {"contentType": "application/octet-stream"},
+            )
+
+        await _upload(path, data)
         stored_paths.append(path)
     return stored_paths
 
