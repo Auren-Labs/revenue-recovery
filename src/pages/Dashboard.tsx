@@ -34,6 +34,8 @@ import { Button } from "@/components/ui/button";
 import { useSearchParams } from "react-router-dom";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Document as PdfDocument, Page as PdfPage, pdfjs } from "react-pdf";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 if (pdfjs?.GlobalWorkerOptions) {
   pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
@@ -422,7 +424,7 @@ const Dashboard = () => {
   }, [analysis, billingSummary.customers?.length, billingSummary.invoice_count, clauseHits]);
 
   const primaryDiscrepancy = discrepancies[0];
-  const patternSummary = truncate(llmSummary, 200) || "LLM insights will appear here once a job completes.";
+const patternSummary = llmSummary || "LLM insights will appear here once a job completes.";
 
   const chartConfig = useMemo<ChartConfig>(
     () => ({
@@ -783,7 +785,9 @@ const Dashboard = () => {
                 </p>
               </div>
             </div>
-            <p className="text-sm text-muted-foreground">{patternSummary}</p>
+            <div className="text-sm text-muted-foreground whitespace-pre-wrap max-h-72 overflow-auto pr-2 prose prose-invert prose-sm">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{patternSummary}</ReactMarkdown>
+            </div>
             <div className="rounded-2xl border border-border/70 bg-secondary/30 p-4 text-sm text-muted-foreground">
               💡 Suggestion: correlate clause hits with billing gaps to trigger alerts before renewals.
             </div>
