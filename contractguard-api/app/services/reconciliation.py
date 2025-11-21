@@ -641,8 +641,25 @@ async def _audit_escalation_clause(
             difference = expected_rate - item.rate
             percentage_diff = (difference / expected_rate) * 100
             
-            # 🔥 FIX: Skip GPT-4o validation for OBVIOUS missing escalations
-            # If the difference is exactly the escalation rate, it's definitely real
+            # 🔥 NEW: Check if this is pro-rata BEFORE validation
+            # Pro-rata indicators:
+            # 1. Amount is roughly 25%, 50%, or 75% of expected (partial month)
+            # 2. Description mentions "pro-rata" or "partial"
+            
+            desc_lower = item.description.lower()
+            pro_rata_keywords = ["pro-rata", "pro rata", "prorata", "partial", "days"]
+            has_pro_rata_keyword = any(kw in desc_lower for kw in pro_rata_keywords)
+            
+            # Check if amount suggests partial month (within 5% of 25%, 50%, 75%)
+            partial_percentages = [0.25, 0.33, 0.50, 0.66, 0.75]
+            actual_percentage = item.rate / expected_rate
+            is_likely_partial = any(abs(actual_percentage - pp) < 0.05 for pp in partial_percentages)
+            
+            if has_pro_rata_keyword or is_likely_partial:
+                logger.info(f"Pro-rata detected and approved: {item.description[:50]} - {item.rate} ({actual_percentage*100:.1f}% of expected)")
+                continue  # Skip this item - it's legitimate pro-rata
+            
+            # Skip GPT-4o validation for OBVIOUS missing escalations
             if abs(percentage_diff - (rules.escalation_rate * 100)) < 1.0:
                 logger.warning(f"OBVIOUS escalation missing: {item.description[:40]} - {item.rate} (expected {expected_rate})")
                 potential_errors.append((item, 0.99, "Missing escalation (exact percentage match)", "dispute"))
