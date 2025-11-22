@@ -325,35 +325,46 @@ const UploadPage = () => {
         )}
 
         {step === 3 && (
-          <div className="rounded-3xl border border-border bg-card/80 backdrop-blur p-10 flex flex-col items-center text-center space-y-6 shadow-hover">
-            <div className="h-16 w-16 rounded-full bg-primary/10 text-primary flex items-center justify-center">
+          <div className="rounded-3xl border border-border bg-card/85 backdrop-blur p-10 shadow-hero flex flex-col items-center text-center space-y-8">
+            <div className="h-16 w-16 rounded-full bg-primary/10 text-primary flex items-center justify-center border border-primary/30">
               {isUploading ? <Loader2 className="h-8 w-8 animate-spin" /> : <CheckCircle2 className="h-8 w-8" />}
             </div>
-            <h3 className="text-3xl font-semibold text-foreground">Audit in progress</h3>
+            <div>
+              <p className="text-xs uppercase tracking-[0.4em] text-muted-foreground">ContractGuard pipeline</p>
+              <h3 className="text-3xl md:text-4xl font-semibold text-foreground mt-2">Audit in progress</h3>
+            </div>
             <p className="text-sm text-muted-foreground max-w-2xl">
-              Analyzing contract rules, cross-referencing billing data, and surfacing leakage. You can close this tab—we’ll email the full
-              Revenue Recovery Report as soon as it’s ready.
+              Analyzing contract rules, aligning them with your billing export, and drafting AI insights. You can close this tab—we’ll email
+              the full Revenue Recovery Report as soon as it’s ready.
             </p>
-            <div className="w-full space-y-3">
-              {(Object.keys(stageLabels) as Stage[]).map((stage) => {
+            <div className="w-full max-w-3xl">
+              {(stageOrder as Stage[]).map((stage) => {
                 const Icon = stageLabels[stage].icon;
                 const currentIndex = currentStage ? stageOrder.indexOf(currentStage) : -1;
                 const stageIndex = stageOrder.indexOf(stage);
                 const isActive = currentStage === stage;
                 const isDone = currentIndex !== -1 && stageIndex !== -1 && stageIndex < currentIndex;
-                const statusLabel = isActive ? "In progress..." : isDone ? "Complete" : "Queued";
+                const statusLabel = isActive ? "In progress" : isDone ? "Complete" : "Queued";
                 return (
-                  <div key={stage} className="flex items-center gap-3 text-sm text-muted-foreground">
-                    <div className="h-10 w-10 rounded-full bg-secondary/60 flex items-center justify-center">
-                      <Icon className="h-5 w-5 text-foreground" />
+                  <div key={stage} className="flex items-center gap-4 py-3 border-b border-border/60 last:border-none">
+                    <div
+                      className={`h-10 w-10 rounded-xl flex items-center justify-center ${
+                        isActive
+                          ? "bg-primary/10 text-primary border border-primary/40"
+                          : isDone
+                            ? "bg-success/10 text-success border border-success/30"
+                            : "bg-card text-muted-foreground border border-border/60"
+                      }`}
+                    >
+                      <Icon className="h-5 w-5" />
                     </div>
                     <div className="flex-1 text-left">
                       <p className="font-semibold text-foreground">{stageLabels[stage].title}</p>
                       <p className="text-xs text-muted-foreground">{stageLabels[stage].description}</p>
                     </div>
-                    <div className="flex-1 text-right text-xs text-primary font-semibold">
+                    <div className="text-xs font-semibold text-muted-foreground min-w-[140px] text-right">
                       {stage === "reconciliation" && isActive && reconProgress ? (
-                        <div className="w-full">
+                        <div>
                           <div className="w-full h-2 bg-secondary/40 rounded-full overflow-hidden">
                             <div
                               className="h-full bg-primary transition-all"
@@ -362,7 +373,7 @@ const UploadPage = () => {
                               }}
                             />
                           </div>
-                          <p className="text-[11px] text-muted-foreground mt-2">{reconProgress.message}</p>
+                          <p className="text-[11px] text-muted-foreground mt-1">{reconProgress.message}</p>
                         </div>
                       ) : (
                         statusLabel

@@ -10,7 +10,7 @@ import csv
 import json
 import logging
 import asyncio
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from statistics import mean
 from typing import Any, Dict, List, Optional, Tuple
@@ -28,7 +28,7 @@ except ImportError:
     AsyncOpenAI = None
 
 from app.config import get_settings
-from app.services import job_manager
+from app.services import job_manager, rag_store
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -137,9 +137,28 @@ class Discrepancy:
     contract_evidence: List[Dict[str, Any]]
     confidence: float
     recommendations: List[str]
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to API response format."""
+        # Since we now create one discrepancy per invoice, just use the first (and only) item
+        primary_item = self.invoice_items[0] if self.invoice_items else None
+        primary_invoice_date = primary_item.invoice_date.isoformat() if primary_item and primary_item.invoice_date else None
+        primary_invoice_number = primary_item.invoice_number if primary_item else None
+        
+        # 🔥 Extract customer from invoice item
+        customer = None
+        if primary_item and primary_item.raw_row:
+            customer = _extract_field(primary_item.raw_row, _CUSTOMER_FIELDS)
+            if customer:
+                customer = str(customer).strip()
+        
+        # 🔥 Generate a meaningful due date (or action date)
+        # For missing escalations, the action should be immediate
+        due_date = None
+        if primary_item and primary_item.invoice_date:
+            # Set due date as 30 days from invoice date for action
+            due_date = (primary_item.invoice_date + timedelta(days=30)).isoformat()
+
         return {
             "type": self.type.value,
             "priority": self.priority.value,
@@ -147,6 +166,10 @@ class Discrepancy:
             "description": self.description,
             "value": round(self.financial_impact, 2),
             "confidence": self.confidence,
+            "customer": customer or "Unknown customer",  # 🔥 ADD THIS
+            "due": due_date,  # 🔥 ADD THIS (optional - can be None)
+            "invoice_date": primary_invoice_date,
+            "invoice_reference": primary_invoice_number,
             "evidence": self.contract_evidence + [
                 {
                     "type": "invoice_line_error",
@@ -157,7 +180,7 @@ class Discrepancy:
                     "classification": item.classification.value,
                     "confidence": item.confidence
                 }
-                for item in self.invoice_items[:5]  # Limit to 5 examples
+                for item in self.invoice_items[:5]
             ],
             "recommendations": self.recommendations
         }
@@ -197,19 +220,113 @@ def _extract_field(row: Dict, choices: List[str]) -> Any:
 
 
 def _parse_date(value: Any) -> date | None:
-    """Parse date from various formats."""
-    if not value:
+    """Parse dates from messy Excel/CSV inputs into ISO-safe dates."""
+    if value in (None, "", "NA", "N/A"):
         return None
+
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+
+    # Excel serial numbers (days since 1899-12-30)
+    if isinstance(value, (int, float)):
+        serial = float(value)
+        if serial > 59:
+            try:
+                excel_epoch = datetime(1899, 12, 30)
+                return (excel_epoch + timedelta(days=int(serial))).date()
+            except (OverflowError, ValueError):
+                pass
+        text = str(int(serial))
+        if len(text) == 8:
+            try:
+                return datetime.strptime(text, "%Y%m%d").date()
+            except ValueError:
+                pass
+
     text = str(value).strip()
-    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y", "%d/%m/%Y", "%B %d, %Y", "%b %d, %Y"):
-        try:
-            return datetime.strptime(text, fmt).date()
-        except ValueError:
-            continue
+    if not text:
+        return None
+
+    # Remove ordinal suffixes
+    for suffix in ("st", "nd", "rd", "th"):
+        text = text.replace(f"{suffix},", ",").replace(f"{suffix} ", " ")
+
+    while "  " in text:
+        text = text.replace("  ", " ")
+
+    # Try ISO parse first
     try:
         return datetime.fromisoformat(text).date()
     except ValueError:
         pass
+
+    normalized = text.replace(".", "/").replace("-", "/")
+
+    # 🔥 CRITICAL FIX: DD-MM-YYYY formats MUST come FIRST
+    candidate_formats = (
+        # Day-first formats (DD-MM-YYYY) - YOUR DATA FORMAT
+        "%d/%m/%Y",   # 01/02/2025 → Feb 1, 2025
+        "%d-%m-%Y",   # 01-02-2025 → Feb 1, 2025
+        "%d.%m.%Y",   # 01.02.2025 → Feb 1, 2025
+        "%d/%m/%y",   # 01/02/25 → Feb 1, 2025
+        "%d-%m-%y",   # 01-02-25 → Feb 1, 2025
+        "%d.%m.%y",   # 01.02.25 → Feb 1, 2025
+        
+        # ISO formats (YYYY-MM-DD)
+        "%Y/%m/%d",   # 2025/02/01
+        "%Y-%m-%d",   # 2025-02-01
+        "%Y.%m.%d",   # 2025.02.01
+        
+        # Month-first formats (MM-DD-YYYY) - US FORMAT, TRY LAST
+        "%m/%d/%Y",   # 02/01/2025 → Feb 1, 2025
+        "%m-%d-%Y",   # 02-01-2025 → Feb 1, 2025
+        "%m.%d.%Y",   # 02.01.2025 → Feb 1, 2025
+        "%m/%d/%y",   # 02/01/25
+        "%m-%d-%y",   # 02-01-25
+        "%m.%d.%y",   # 02.01.25
+        
+        # Named months
+        "%B %d, %Y",  # February 1, 2025
+        "%b %d, %Y",  # Feb 1, 2025
+        "%d %B %Y",   # 1 February 2025
+        "%d %b %Y",   # 1 Feb 2025
+        "%d-%b-%Y",   # 1-Feb-2025
+        "%d-%B-%Y",   # 1-February-2025
+    )
+
+    for fmt in candidate_formats:
+        try:
+            return datetime.strptime(normalized, fmt).date()
+        except ValueError:
+            continue
+
+    # Fallback heuristic - try DD/MM/YYYY first
+    parts = normalized.split("/")
+    if len(parts) == 3 and all(part.isdigit() for part in parts):
+        first, second, third = parts
+        year_val = int(third)
+        if year_val < 100:
+            year_val += 2000
+        
+        # 🔥 Try DD/MM/YYYY FIRST (not MM/DD/YYYY)
+        try:
+            day, month = int(first), int(second)
+            if 1 <= day <= 31 and 1 <= month <= 12:
+                return date(year_val, month, day)
+        except ValueError:
+            pass
+        
+        # Try MM/DD/YYYY as fallback
+        try:
+            month, day = int(first), int(second)
+            if 1 <= day <= 31 and 1 <= month <= 12:
+                return date(year_val, month, day)
+        except ValueError:
+            pass
+
+    logger.warning(f"Could not parse date: '{value}'")
     return None
 
 
@@ -609,13 +726,15 @@ async def _parse_invoice_items(
 # INTELLIGENT ESCALATION AUDIT
 # ============================================================================
 
+
 async def _audit_escalation_clause(
     invoice_items: List[InvoiceLineItem],
     rules: ContractRules,
     documents: List[Dict[str, Any]]
-) -> Optional[Discrepancy]:
+) -> List[Discrepancy]:  # 🔥 Changed: Returns List instead of Optional
     """
-    Audit for missing price escalations with zero false positives.
+    Audit for missing price escalations.
+    Returns one discrepancy per affected invoice for granular tracking.
     """
     # Filter to recurring charges after escalation date
     affected_items = [
@@ -625,7 +744,7 @@ async def _audit_escalation_clause(
     
     if not affected_items:
         logger.info("No recurring charges after escalation date")
-        return None
+        return []  # 🔥 Changed: Return empty list
     
     logger.info(f"Auditing {len(affected_items)} recurring charges after {rules.effective_start_date}")
     
@@ -641,11 +760,7 @@ async def _audit_escalation_clause(
             difference = expected_rate - item.rate
             percentage_diff = (difference / expected_rate) * 100
             
-            # 🔥 NEW: Check if this is pro-rata BEFORE validation
-            # Pro-rata indicators:
-            # 1. Amount is roughly 25%, 50%, or 75% of expected (partial month)
-            # 2. Description mentions "pro-rata" or "partial"
-            
+            # Check for pro-rata BEFORE validation
             desc_lower = item.description.lower()
             pro_rata_keywords = ["pro-rata", "pro rata", "prorata", "partial", "days"]
             has_pro_rata_keyword = any(kw in desc_lower for kw in pro_rata_keywords)
@@ -680,42 +795,45 @@ async def _audit_escalation_clause(
     
     if not potential_errors:
         logger.info("✓ No escalation issues detected")
-        return None
+        return []  # 🔥 Changed: Return empty list
     
-    # Calculate total impact - FIX: Unpack 4 items
-    total_leakage = sum(expected_rate - item.rate for item, _, _, _ in potential_errors)
-    
-    # Get contract evidence
+    # 🔥 CRITICAL CHANGE: Create ONE discrepancy PER invoice
+    discrepancies = []
     contract_evidence = _get_clause_references(documents, "cpi_uplift", limit=2)
     
-    # Build recommendations
-    recommendations = [
-        f"Review {len(potential_errors)} invoice(s) for missing {rules.escalation_rate*100}% escalation",
-        f"Expected rate after escalation: {expected_rate:,.2f} {rules.currency}",
-        f"Escalation effective from: {rules.effective_start_date}"
-    ]
+    for item, confidence, reason, action in potential_errors:
+        leakage_amount = expected_rate - item.rate
+        
+        # Determine priority for this specific invoice
+        if leakage_amount > rules.base_amount * 0.1 and confidence > 0.85:
+            priority = Priority.CRITICAL
+        elif confidence > 0.8:
+            priority = Priority.HIGH
+        else:
+            priority = Priority.MEDIUM
+        
+        discrepancy = Discrepancy(
+            type=DiscrepancyType.MISSING_ESCALATION,
+            priority=priority,
+            title=f"Price escalation not applied ({rules.escalation_rate*100}%)",
+            description=f"Invoice dated {item.invoice_date} shows rate of {item.rate:,.2f} instead of expected {expected_rate:,.2f} after {rules.escalation_rate*100}% escalation.",
+            financial_impact=leakage_amount,
+            invoice_items=[item],  # 🔥 Only THIS invoice
+            contract_evidence=contract_evidence,
+            confidence=confidence,
+            recommendations=[
+                f"Review invoice {item.invoice_number or 'for ' + item.invoice_date.strftime('%B %Y') if item.invoice_date else ''}",
+                f"Expected rate after escalation: {expected_rate:,.2f} {rules.currency}",
+                f"Escalation effective from: {rules.effective_start_date}",
+                f"Action: {action}"
+            ]
+        )
+        # 🔥 ADD THIS DEBUG:
+        logger.info(f"Created discrepancy: date={item.invoice_date}, amount={leakage_amount}, desc={item.description[:40]}")
+        discrepancies.append(discrepancy)
     
-    # Determine priority - FIX: Unpack 4 items
-    avg_confidence = mean(conf for _, conf, _, _ in potential_errors) if potential_errors else 0.8
-    if total_leakage > rules.base_amount * 0.1 and avg_confidence > 0.85:
-        priority = Priority.CRITICAL
-    elif avg_confidence > 0.8:
-        priority = Priority.HIGH
-    else:
-        priority = Priority.MEDIUM
-    
-    return Discrepancy(
-        type=DiscrepancyType.MISSING_ESCALATION,
-        priority=priority,
-        title=f"Price escalation not applied ({rules.escalation_rate*100}%)",
-        description=f"Contract requires {rules.escalation_rate*100}% annual escalation effective {rules.effective_start_date}. "
-                   f"Found {len(potential_errors)} invoice(s) still at old rate of {rules.base_amount:,.2f} instead of {expected_rate:,.2f}.",
-        financial_impact=total_leakage,
-        invoice_items=[item for item, _, _, _ in potential_errors],  # FIX: Unpack 4 items
-        contract_evidence=contract_evidence,
-        confidence=avg_confidence,
-        recommendations=recommendations
-    )
+    logger.info(f"✓ Created {len(discrepancies)} individual discrepancy records")
+    return discrepancies  # 🔥 Return list of discrepancies
 
 
 # ============================================================================
@@ -888,6 +1006,7 @@ def _summarize_billing(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 # MAIN PIPELINE
 # ============================================================================
 
+
 async def run(job, llm_insights: Dict) -> Dict:
     """
     Production-grade intelligent reconciliation pipeline.
@@ -924,10 +1043,9 @@ async def run(job, llm_insights: Dict) -> Dict:
     
     discrepancies = []
     
-    # Audit 1: Price escalation
-    escalation_discrepancy = await _audit_escalation_clause(invoice_items, rules, documents)
-    if escalation_discrepancy:
-        discrepancies.append(escalation_discrepancy)
+    # Audit 1: Price escalation (now returns List[Discrepancy])
+    escalation_discrepancies = await _audit_escalation_clause(invoice_items, rules, documents)
+    discrepancies.extend(escalation_discrepancies)  # 🔥 Use extend instead of append
     
     # Audit 2: SLA credits (only if evidence of issues)
     sla_discrepancy = await _audit_sla_credits(
@@ -950,6 +1068,12 @@ async def run(job, llm_insights: Dict) -> Dict:
     job.metrics["recoverable_amount"] = round(total_recoverable, 2)
     job.metrics["currency"] = rules.currency
     job.metrics["gpt4o_enhanced"] = True
+    job.metrics["gpt4o_rules"] = {  # 🔥 ADD THIS: Store rules for frontend
+        "base_amount": rules.base_amount,
+        "escalation_rate": rules.escalation_rate,
+        "effective_start_date": rules.effective_start_date.isoformat(),
+        "currency": rules.currency
+    }
     job.metrics["audit_time_seconds"] = audit_time
     job.metrics["classification_stats"] = {
         "total_items": len(invoice_items),
@@ -962,6 +1086,8 @@ async def run(job, llm_insights: Dict) -> Dict:
     # Convert discrepancies to API format
     job.discrepancies = [d.to_dict() for d in discrepancies]
     
+    await rag_store.index_billing(job, job.discrepancies)
+
     # Log summary
     logger.info("="*70)
     logger.info(f"RECONCILIATION COMPLETE")

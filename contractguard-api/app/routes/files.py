@@ -2,16 +2,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
+from app.auth import require_user
 from app.services import job_manager
 
 router = APIRouter()
 
 
-def _find_local_file(job_id: str, filename: str, category: str) -> Path | None:
-    job = job_manager.get_job(job_id)
+def _find_local_file(job_id: str, filename: str, category: str, organization_id: str | None) -> Path | None:
+    job = job_manager.get_job(job_id, organization_id)
     if not job:
         return None
 
@@ -34,8 +35,8 @@ def _find_local_file(job_id: str, filename: str, category: str) -> Path | None:
 
 
 @router.get("/jobs/{job_id}/contracts/{filename}")
-def download_contract(job_id: str, filename: str):
-    path = _find_local_file(job_id, filename, "contracts")
+def download_contract(job_id: str, filename: str, current_user=Depends(require_user)):
+    path = _find_local_file(job_id, filename, "contracts", current_user.get("organization_id"))
     if not path:
         raise HTTPException(status_code=404, detail="Contract file not found.")
     return FileResponse(path, filename=filename, media_type="application/pdf")

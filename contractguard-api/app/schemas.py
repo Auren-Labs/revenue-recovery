@@ -29,4 +29,13 @@ class AnalysisSummary(BaseModel):
     discrepancies: List[dict]
 
 
+class ChatRequest(BaseModel):
+    question: str
+
+
+class ChatResponse(BaseModel):
+    answer: str
+    context_summary: Optional[str] = None
+    sources: Optional[List[dict]] = None
+
 

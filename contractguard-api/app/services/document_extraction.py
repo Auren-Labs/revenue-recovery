@@ -24,7 +24,7 @@ except ImportError:
     OpenAI = None
 
 from app.config import get_settings
-from app.services import job_manager
+from app.services import job_manager, rag_store
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -214,14 +214,21 @@ Respond with ONLY valid JSON:
   "reasoning": "<brief explanation>"
 }}"""
 
-            response = await client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "You are a precise contract clause validator. Always return valid JSON."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.1,
-                max_tokens=500
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are a precise contract clause validator. Always return valid JSON.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.1,
+                    max_tokens=500,
+                ),
             )
             
             response_text = response.choices[0].message.content.strip()
@@ -255,35 +262,37 @@ Respond with ONLY valid JSON:
 
         try:
             import base64
-            
+
             # Read and encode image
             with open(image_path, "rb") as image_file:
-                image_data = base64.b64encode(image_file.read()).decode('utf-8')
-            
-            response = await client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "Extract ALL text from this document image. Maintain structure and formatting. Return only the extracted text."
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{image_data}"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                max_tokens=4000
+                image_data = base64.b64encode(image_file.read()).decode("utf-8")
+
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Extract ALL text from this document image. Maintain structure and formatting. Return only the extracted text.",
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:image/jpeg;base64,{image_data}"},
+                                },
+                            ],
+                        }
+                    ],
+                    max_tokens=4000,
+                ),
             )
-            
+
             return response.choices[0].message.content
-            
+
         except Exception as e:
             logger.error(f"GPT-4o vision extraction failed: {e}")
             return ""
@@ -582,6 +591,7 @@ async def run(job, documents: List[Dict]) -> Dict:
     if not documents:
         job.metrics["documents"] = []
         job.metrics["total_clauses"] = 0
+        await rag_store.index_contracts(job, [])
         return {"clauses": 0, "documents": []}
 
     client = _create_client()
@@ -635,6 +645,7 @@ async def run(job, documents: List[Dict]) -> Dict:
         job.metrics["documents"] = extracted_docs
         job.metrics["total_clauses"] = total_clauses
         job.metrics["extraction_method"] = "gpt4o_fallback"
+        await rag_store.index_contracts(job, extracted_docs)
         return {"clauses": total_clauses, "documents": extracted_docs}
 
     # Standard Azure + GPT-4o pipeline
@@ -660,4 +671,6 @@ async def run(job, documents: List[Dict]) -> Dict:
     job.metrics["azure_model_id"] = settings.azure_afr_contract_model_id
     job.metrics["llm_enhancer"] = "gpt4o"
     
+    await rag_store.index_contracts(job, extracted_docs)
+
     return {"clauses": total_clauses, "documents": extracted_docs}

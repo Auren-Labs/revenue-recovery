@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from typing import List
 
+from app.auth import require_user
 from app.schemas import UploadResponse, JobStatus
 from app.services import job_manager, file_handler
 
@@ -13,18 +14,23 @@ router = APIRouter()
 async def upload_contracts(
     vendor_name: str = Form(...),
     files: List[UploadFile] = File(..., description="MSA, SOWs, amendments"),
+    current_user=Depends(require_user),
 ) -> UploadResponse:
     if not files:
         raise HTTPException(status_code=400, detail="Contract files are required.")
-    job = job_manager.create_job(vendor_name)
+    job = job_manager.create_job(vendor_name, current_user.get("organization_id"))
     metadata = await file_handler.store_contracts(job.id, files)
     job_manager.attach_contracts(job, metadata)
     return UploadResponse(job_id=job.id, message="Contracts uploaded. Next, upload billing data.")
 
 
 @router.post("/{job_id}/billing", response_model=UploadResponse)
-async def upload_billing(job_id: str, files: List[UploadFile] = File(..., description="Billing CSV/XLSX export")) -> UploadResponse:
-    job = job_manager.get_job(job_id)
+async def upload_billing(
+    job_id: str,
+    files: List[UploadFile] = File(..., description="Billing CSV/XLSX export"),
+    current_user=Depends(require_user),
+) -> UploadResponse:
+    job = job_manager.get_job(job_id, current_user.get("organization_id"))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     if not files:
@@ -35,8 +41,8 @@ async def upload_billing(job_id: str, files: List[UploadFile] = File(..., descri
 
 
 @router.post("/{job_id}/submit", response_model=UploadResponse)
-async def submit_job(job_id: str) -> UploadResponse:
-    job = job_manager.get_job(job_id)
+async def submit_job(job_id: str, current_user=Depends(require_user)) -> UploadResponse:
+    job = job_manager.get_job(job_id, current_user.get("organization_id"))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     if not job.contracts:
@@ -48,8 +54,8 @@ async def submit_job(job_id: str) -> UploadResponse:
 
 
 @router.get("/{job_id}/status", response_model=JobStatus)
-async def job_status(job_id: str) -> JobStatus:
-    job = job_manager.get_job(job_id)
+async def job_status(job_id: str, current_user=Depends(require_user)) -> JobStatus:
+    job = job_manager.get_job(job_id, current_user.get("organization_id"))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     return JobStatus(

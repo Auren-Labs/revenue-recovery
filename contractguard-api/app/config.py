@@ -25,6 +25,12 @@ class Settings(BaseSettings):
 
     openai_api_key: Optional[str] = None
     openai_model: str = "gpt-4o-mini"
+    openai_embedding_model: str = "text-embedding-ada-002"
+
+    rag_contract_table: str = "contract_chunks"
+    rag_billing_table: str = "billing_chunks"
+
+    supabase_jwt_secret: Optional[str] = None
 
     redis_broker_url: str = "redis://localhost:6379/0"
     redis_result_backend: str = "redis://localhost:6379/1"
