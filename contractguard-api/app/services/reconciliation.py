@@ -914,13 +914,28 @@ def _get_clause_references(documents: List[Dict[str, Any]] | None, label: str, l
     for doc in documents:
         for clause in doc.get("clauses", []) or []:
             if clause.get("label") == label:
-                references.append({
+                reference = {
                     "type": "contract_clause",
                     "label": label,
                     "text": clause.get("text"),
                     "file": doc.get("filename"),
                     "confidence": clause.get("confidence")
-                })
+                }
+                
+                # Add regions/bounds data if available for highlighting
+                if clause.get("regions"):
+                    reference["regions"] = clause.get("regions")
+                    # Also add the first region's bounds as a top-level bounds for convenience
+                    if clause["regions"] and len(clause["regions"]) > 0:
+                        first_region = clause["regions"][0]
+                        if first_region.get("bounds"):
+                            reference["bounds"] = first_region["bounds"]
+                
+                # Add page number if available
+                if clause.get("page") is not None:
+                    reference["page"] = clause.get("page")
+                
+                references.append(reference)
                 if len(references) >= limit:
                     return references
     
