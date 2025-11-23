@@ -175,6 +175,18 @@ class UserInfoResponse(BaseModel):
     customer: Dict
 
 
+class UpdateProfileRequest(BaseModel):
+    """Request model for updating user profile."""
+    full_name: Optional[str] = None
+    email: Optional[EmailStr] = None
+
+
+class ChangePasswordRequest(BaseModel):
+    """Request model for changing password."""
+    current_password: str
+    new_password: str
+
+
 @router.get("/me", response_model=UserInfoResponse)
 async def get_current_user_info(
     user_customer: tuple[User, Customer] = Depends(get_current_user)
@@ -190,6 +202,55 @@ async def get_current_user_info(
         user=user.to_dict(),
         customer=customer.to_dict(),
     )
+
+
+@router.put("/me", response_model=UserInfoResponse)
+async def update_profile(
+    request: UpdateProfileRequest,
+    user_customer: tuple[User, Customer] = Depends(get_current_user)
+):
+    """
+    Update current user profile.
+    
+    Returns:
+        Updated user and customer information
+    """
+    user, customer = user_customer
+    auth_service = get_auth_service()
+    
+    updated_user = await auth_service.update_user_profile(
+        user.id,
+        full_name=request.full_name,
+        email=request.email
+    )
+    
+    return UserInfoResponse(
+        user=updated_user.to_dict(),
+        customer=customer.to_dict(),
+    )
+
+
+@router.post("/me/change-password")
+async def change_password(
+    request: ChangePasswordRequest,
+    user_customer: tuple[User, Customer] = Depends(get_current_user)
+):
+    """
+    Change user password.
+    
+    Returns:
+        Success message
+    """
+    user, _ = user_customer
+    auth_service = get_auth_service()
+    
+    await auth_service.change_password(
+        user.id,
+        request.current_password,
+        request.new_password
+    )
+    
+    return {"message": "Password changed successfully"}
 
 
 @router.get("/debug/token")

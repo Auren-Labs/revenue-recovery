@@ -12,12 +12,26 @@ from app.services.auth import get_auth_service
 
 logger = logging.getLogger(__name__)
 
-try:
-    from app.workers.tasks import process_job as celery_task
+# Lazy import to avoid circular dependency
+CELERY_AVAILABLE = False
+process_audit_job = None
 
-    CELERY_AVAILABLE = True
-except Exception:
-    CELERY_AVAILABLE = False
+def _check_celery_available():
+    """Check if Celery is available and import the task."""
+    global CELERY_AVAILABLE, process_audit_job
+    if CELERY_AVAILABLE and process_audit_job is not None:
+        return True
+    
+    try:
+        from app.workers.tasks import process_audit_job as task
+        process_audit_job = task
+        CELERY_AVAILABLE = True
+        return True
+    except Exception as e:
+        logger.warning("Celery not available: %s", e)
+        CELERY_AVAILABLE = False
+        process_audit_job = None
+        return False
 
 def create_job(vendor_name: str, organization_id: str | None) -> Job:
     return job_repository.create_job_record(vendor_name, organization_id)
@@ -163,11 +177,30 @@ async def simulate_latency(seconds: float = 1.0) -> None:
     await asyncio.sleep(seconds)
 
 
-def enqueue_job(job_id: str):
-    if CELERY_AVAILABLE:
-        celery_task.delay(job_id)
+def enqueue_job(job_id: str) -> None:
+    """
+    Enqueue a job for background processing.
+    
+    Uses Celery if available, otherwise falls back to async thread.
+    This function returns immediately - the job is processed in the background.
+    
+    Args:
+        job_id: The ID of the job to process
+    """
+    # Lazy import to avoid circular dependency
+    if _check_celery_available() and process_audit_job:
+        try:
+            # Enqueue to Celery (returns immediately)
+            process_audit_job.delay(job_id)
+            logger.info("Job %s enqueued to Celery for background processing", job_id)
+        except Exception as e:
+            logger.error("Failed to enqueue job %s to Celery: %s", job_id, e, exc_info=True)
+            # Fallback to async thread
+            logger.warning("Falling back to async thread processing for job %s", job_id)
+            asyncio.create_task(run_pipeline_async(job_id))
     else:
-        # fallback: run in background thread
+        # Fallback: run in background thread (not recommended for production)
+        logger.warning("Celery not available, using async thread fallback for job %s", job_id)
         asyncio.create_task(run_pipeline_async(job_id))
 
 

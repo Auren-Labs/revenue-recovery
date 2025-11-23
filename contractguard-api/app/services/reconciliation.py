@@ -28,7 +28,8 @@ except ImportError:
     AsyncOpenAI = None
 
 from app.config import get_settings
-from app.services import job_manager, rag_store
+from app.services import job_manager
+from app.services import openai_rate_limit, rag_store
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -438,6 +439,21 @@ class IntelligentClassifier:
             self.cache[cache_key] = result
             return result
         
+        # ✅ CHECK rate limit BEFORE calling API
+        is_allowed, error_msg = openai_rate_limit.check_openai_rate_limit(
+            self.customer_id,
+            self.job_id
+        )
+        if not is_allowed:
+            logger.warning(f"OpenAI rate limit hit for job {self.job_id}: {error_msg}")
+            # Fall back to deterministic classification
+            if amount > 50000:
+                result = (InvoiceClassification.RECURRING, 0.6, f"Rate limit hit, using fallback: {error_msg}")
+            else:
+                result = (InvoiceClassification.UNKNOWN, 0.4, f"Rate limit hit: {error_msg}")
+            self.cache[cache_key] = result
+            return result
+        
         try:
             prompt = f"""Classify this invoice line: RECURRING, ONE_TIME, or ADJUSTMENT?
 
@@ -460,6 +476,14 @@ JSON only: {{"classification": "RECURRING|ONE_TIME|ADJUSTMENT", "confidence": 0.
                 ],
                 temperature=0.0,
                 max_tokens=100
+            )
+            
+            # ✅ RECORD the call
+            tokens_used = response.usage.total_tokens if response.usage else 0
+            openai_rate_limit.record_openai_call(
+                self.customer_id,
+                self.job_id,
+                tokens_used
             )
             
             response_text = response.choices[0].message.content.strip()
@@ -518,6 +542,16 @@ JSON only: {{"classification": "RECURRING|ONE_TIME|ADJUSTMENT", "confidence": 0.
         if invoice_item.classification == InvoiceClassification.ADJUSTMENT:
             return (False, 0.90, "Legitimate adjustment (pro-rata or partial)", "approve")
         
+        # ✅ CHECK rate limit BEFORE calling API
+        is_allowed, error_msg = openai_rate_limit.check_openai_rate_limit(
+            self.customer_id,
+            self.job_id
+        )
+        if not is_allowed:
+            logger.warning(f"OpenAI rate limit hit for job {self.job_id}: {error_msg}")
+            # Fall back to conservative validation
+            return (True, 0.6, f"Rate limit hit, defaulting to flag: {error_msg}", "investigate")
+        
         try:
             # 🔥 IMPROVED PROMPT:
             prompt = f"""You are auditing a billing discrepancy. Determine if this is a REAL ERROR or FALSE POSITIVE.
@@ -557,6 +591,14 @@ JSON only: {{"classification": "RECURRING|ONE_TIME|ADJUSTMENT", "confidence": 0.
                 ],
                 temperature=0.0,  # Changed from 0.1 to 0.0 for more consistency
                 max_tokens=200
+            )
+            
+            # ✅ RECORD the call
+            tokens_used = response.usage.total_tokens if response.usage else 0
+            openai_rate_limit.record_openai_call(
+                self.customer_id,
+                self.job_id,
+                tokens_used
             )
             
             response_text = response.choices[0].message.content.strip()

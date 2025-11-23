@@ -22,6 +22,10 @@ import {
   ArrowRight,
   TrendingUp,
   TrendingDown,
+  MessageSquare,
+  Copy,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react";
 import { getAuthHeader, logout } from "@/utils/auth";
 import { ChartStyle, ChartConfig } from "@/components/ui/chart";
@@ -56,7 +60,8 @@ import { PerformanceMetrics } from "@/components/PerformanceMetrics";
 import { EmptyState } from "@/components/EmptyState";
 import { DashboardSkeleton } from "@/components/LoadingSkeleton";
 import { CustomerDrillDown } from "@/components/CustomerDrillDown";
-import { HelpCircle, Upload, FileSearch, CheckCircle2, History, Download, FileDown } from "lucide-react";
+import { HelpCircle, Upload, FileSearch, CheckCircle2, History as HistoryIcon, Download, FileDown, Settings } from "lucide-react";
+import { useToast } from "@/components/ui/use-toast";
 
 if (pdfjs?.GlobalWorkerOptions) {
   pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
@@ -298,6 +303,7 @@ const parseInvoiceDate = (value?: string | null): Date | null => {
 
 const Dashboard = () => {
   const navigate = useNavigate();
+  const { toast } = useToast();
   const [searchParams] = useSearchParams();
   const jobId = searchParams.get("job");
   const [analysis, setAnalysis] = useState<AnalysisSummary | null>(null);
@@ -320,6 +326,7 @@ const Dashboard = () => {
     }
   }, [viewerClause]);
   const [selectedDiscrepancy, setSelectedDiscrepancy] = useState<any | null>(null);
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
   type ChatMessage = {
     id: string;
     role: "user" | "assistant";
@@ -635,6 +642,75 @@ const Dashboard = () => {
     return monthBuckets;
   }, [discrepancies]);
 
+  // Group discrepancies by customer
+  const groupedDiscrepancies = useMemo(() => {
+    if (!analysis || !discrepancies.length) return [];
+    
+    const grouped = discrepancies.reduce((acc, disc) => {
+      const customer = disc.customer || "Unknown Customer";
+      
+      if (!acc[customer]) {
+        acc[customer] = {
+          customer,
+          total: 0,
+          count: 0,
+          priority: disc.priority || "medium",
+          earliest_date: disc.invoice_date || "",
+          latest_date: disc.invoice_date || "",
+          discrepancies: [],
+        };
+      }
+      
+      acc[customer].total += disc.value || 0;
+      acc[customer].count += 1;
+      acc[customer].discrepancies.push(disc);
+      
+      // Track date range
+      if (disc.invoice_date) {
+        if (!acc[customer].earliest_date || disc.invoice_date < acc[customer].earliest_date) {
+          acc[customer].earliest_date = disc.invoice_date;
+        }
+        if (!acc[customer].latest_date || disc.invoice_date > acc[customer].latest_date) {
+          acc[customer].latest_date = disc.invoice_date;
+        }
+      }
+      
+      // Update priority to highest
+      const priorityOrder = { critical: 4, high: 3, medium: 2, low: 1 };
+      const currentPriority = priorityOrder[acc[customer].priority?.toLowerCase() as keyof typeof priorityOrder] || 0;
+      const discPriority = priorityOrder[(disc.priority || "medium").toLowerCase() as keyof typeof priorityOrder] || 0;
+      if (discPriority > currentPriority) {
+        acc[customer].priority = disc.priority || "medium";
+      }
+      
+      return acc;
+    }, {} as Record<string, {
+      customer: string;
+      total: number;
+      count: number;
+      priority: string;
+      earliest_date: string;
+      latest_date: string;
+      discrepancies: typeof discrepancies[number][];
+    }>);
+    
+    return Object.values(grouped).sort((a, b) => b.total - a.total);
+  }, [analysis, discrepancies]);
+
+  const formatDateRange = (earliest: string, latest: string) => {
+    if (!earliest || !latest) return "N/A";
+    try {
+      const start = new Date(earliest);
+      const end = new Date(latest);
+      if (start.getFullYear() === end.getFullYear() && start.getMonth() === end.getMonth()) {
+        return start.toLocaleDateString("en-US", { month: "short", year: "numeric" });
+      }
+      return `${start.toLocaleDateString("en-US", { month: "short", year: "numeric" })} - ${end.toLocaleDateString("en-US", { month: "short", year: "numeric" })}`;
+    } catch {
+      return `${earliest} - ${latest}`;
+    }
+  };
+
   const discrepancyAlerts = useMemo(() => {
     if (!analysis) return defaultContractAlerts;
     if (!discrepancies.length) {
@@ -823,8 +899,12 @@ const chartFriendlyLabel = {
                 New Audit
               </Button>
               <Button variant="ghost" size="sm" onClick={() => navigate("/history")}>
-                <History className="h-4 w-4 mr-2" />
+                <HistoryIcon className="h-4 w-4 mr-2" />
                 View History
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => navigate("/settings")}>
+                <Settings className="h-4 w-4 mr-2" />
+                Settings
               </Button>
               <Button variant="ghost" size="sm" onClick={handleLogout}>
                 Logout
@@ -1238,105 +1318,100 @@ const chartFriendlyLabel = {
                 </div>
               </div>
             </div>
-            <div className="divide-y divide-border/60">
-              {discrepancyAlerts.length === 0 || (discrepancyAlerts.length === 1 && discrepancyAlerts[0].id === "all-clear") ? (
+            <div className="space-y-4">
+              {groupedDiscrepancies.length === 0 ? (
                 <EmptyState
                   icon={CheckCircle2}
                   title="No discrepancies found"
                   description="All invoices match contract terms. Great job keeping your billing in check!"
                 />
               ) : (
-                discrepancyAlerts.map((alert, index) => (
-                  <div key={alert.id ?? `alert-${index}`} className="py-4 flex flex-col gap-3">
-                    <div className="flex flex-wrap items-center gap-4">
-                      <div className="flex-1 min-w-[200px]">
-                        <p className="font-semibold text-foreground flex items-center gap-2">
-                          <button
-                            onClick={() => setSelectedCustomer(alert.customer)}
-                            className="hover:text-primary hover:underline transition-colors"
-                          >
-                            {alert.customer}
-                          </button>
-                        <span
-                          className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
-                          alert.priority === "high"
-                              ? "bg-destructive/10 text-destructive"
-                              : alert.priority === "medium"
-                                ? "bg-cta/10 text-cta"
-                                : "bg-secondary/60 text-foreground"
-                          }`}
-                        >
-                          {alert.priority.toUpperCase()}
-                        </span>
-                      </p>
-                      <p className="text-sm text-muted-foreground">{alert.issue}</p>
-                    </div>
-                    <p className="text-foreground font-mono">{alert.value}</p>
-                    {alert.due && alert.due !== "No due date" && (
-                      <p className="text-sm text-muted-foreground">{alert.due}</p>
-                    )}
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <Button variant="secondary" size="sm">
-                      View Evidence
-                    </Button>
-                    <Button variant="secondary" size="sm">
-                      Mark Resolved
-                    </Button>
-                    <Button variant="secondary" size="sm">
-                      Export Report
-                    </Button>
-                    <Button variant="secondary" size="sm">
-                      Notify Customer
-                    </Button>
-                    <Button variant="secondary" size="sm" onClick={() => setSelectedDiscrepancy(alert.raw ?? alert)}>
-                      View details
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="text-cta"
-                      onClick={() => setOpenEvidenceKey(openEvidenceKey === alert.id ? null : alert.id)}
+                groupedDiscrepancies.map((group, groupIndex) => {
+                  const groupKey = `group-${group.customer}-${groupIndex}`;
+                  const isExpanded = expandedGroups[groupKey] || false;
+                  const priorityClass = group.priority?.toLowerCase() === "high" || group.priority?.toLowerCase() === "critical"
+                    ? "border-destructive"
+                    : group.priority?.toLowerCase() === "medium"
+                      ? "border-cta"
+                      : "border-border";
+                  
+                  return (
+                    <div
+                      key={groupKey}
+                      className={`border-l-4 ${priorityClass} rounded-lg p-4 bg-card border border-border/60 shadow-sm`}
                     >
-                      {openEvidenceKey === alert.id ? "Hide references" : "View references"}
-                    </Button>
-                  </div>
-                  {openEvidenceKey === alert.id && (
-                    <div className="bg-secondary/40 border border-border/60 rounded-2xl p-3 text-xs text-muted-foreground space-y-2">
-                      {alert.evidence?.length ? (
-                        alert.evidence.map((item, index) => (
-                          <div key={`${alert.id}-evidence-${index}`} className="space-y-1">
-                            <p className="text-sm font-semibold text-foreground flex items-center gap-2">
-                              {item.type === "contract_clause" ? `Clause: ${item.label}` : `Invoice: ${item.reference}`}
-                              {item.type === "contract_clause" && (
-                                <Button
-                                  variant="link"
-                                  size="sm"
-                                  className="p-0 h-auto text-cta"
-                                  onClick={() => openClauseReference(item)}
-                                >
-                                  View in contract
-                                </Button>
-                              )}
+                      {/* Header - shows aggregate */}
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-3">
+                          <AlertTriangle className={`h-5 w-5 ${
+                            group.priority?.toLowerCase() === "high" || group.priority?.toLowerCase() === "critical"
+                              ? "text-destructive"
+                              : group.priority?.toLowerCase() === "medium"
+                                ? "text-cta"
+                                : "text-muted-foreground"
+                          }`} />
+                          <div>
+                            <h3 className="font-semibold text-lg">{group.customer}</h3>
+                            <p className="text-xs text-muted-foreground">
+                              {group.count} {group.count === 1 ? "issue" : "issues"} spanning {formatDateRange(group.earliest_date, group.latest_date)}
                             </p>
-                            {item.text && <p className="italic">"{item.text}"</p>}
-                            <p>
-                              {item.amount !== undefined && (
-                                  <span>{formatCurrency(item.amount, contractCurrency)} • </span>
-                                )}
-                              {item.period && <span>{item.period} • </span>}
-                              {item.file && <span>Source: {item.file}</span>}
-                            </p>
-                            {item.notes && <p>Note: {item.notes}</p>}
                           </div>
-                        ))
-                      ) : (
-                        <p>No structured evidence attached.</p>
-                      )}
+                        </div>
+                        <div className="text-right">
+                          <p className="text-2xl font-bold text-destructive">
+                            {formatCurrency(group.total, contractCurrency)}
+                          </p>
+                          <span className={`text-xs font-semibold px-2 py-1 rounded-full ${
+                            group.priority?.toLowerCase() === "high" || group.priority?.toLowerCase() === "critical"
+                              ? "bg-destructive text-destructive-foreground"
+                              : group.priority?.toLowerCase() === "medium"
+                                ? "bg-cta text-cta-foreground"
+                                : "bg-secondary text-foreground"
+                          }`}>
+                            {group.priority?.toUpperCase() || "MEDIUM"}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Expandable invoice list */}
+                      <details 
+                        className="mt-3"
+                        open={isExpanded}
+                        onToggle={(e) => setExpandedGroups({ ...expandedGroups, [groupKey]: (e.target as HTMLDetailsElement).open })}
+                      >
+                        <summary className="cursor-pointer text-sm text-muted-foreground hover:text-foreground flex items-center gap-2 list-none">
+                          {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                          <span>View {group.count} affected {group.count === 1 ? "invoice" : "invoices"} →</span>
+                        </summary>
+                        <div className="mt-3 space-y-2 pl-4 border-l border-border">
+                          {group.discrepancies.map((disc, idx) => (
+                            <div key={`${group.customer}-${idx}`} className="text-sm flex justify-between items-center py-2 border-b border-border/30 last:border-0">
+                              <div className="flex-1">
+                                <span className="text-muted-foreground">{disc.invoice_date || "N/A"}</span>
+                                {disc.issue && (
+                                  <span className="ml-2 text-xs text-muted-foreground">• {disc.issue}</span>
+                                )}
+                              </div>
+                              <span className="font-mono text-destructive font-semibold">
+                                {formatCurrency(disc.value || 0, contractCurrency)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+
+                      {/* Actions */}
+                      <div className="flex gap-2 mt-4">
+                        <Button variant="cta" size="sm" className="gap-2">
+                          <Mail className="h-4 w-4" />
+                          Draft Email ({formatCurrency(group.total, contractCurrency)})
+                        </Button>
+                        <Button variant="secondary" size="sm">View Contract</Button>
+                        <Button variant="secondary" size="sm">Export Report</Button>
+                      </div>
                     </div>
-                  )}
-                </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>
@@ -1432,70 +1507,125 @@ const chartFriendlyLabel = {
           </div>
         </div>
           <div className="rounded-3xl border border-border bg-card/95 shadow-hover p-0 overflow-hidden">
-            <div className="flex items-center justify-between border-b border-border/60 px-6 py-4 bg-gradient-to-r from-primary/10 to-transparent">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-primary flex items-center gap-2">
-                  <Lightbulb className="h-4 w-4" />
-                  LLM Insight Center
-                </p>
-                <p className="text-2xl font-bold text-foreground mt-1">
-                  {primaryDiscrepancy?.customer ?? "GPT-4o Analysis"}
-                </p>
-              </div>
-              <div className="text-xs text-muted-foreground text-right">
-                <p>Model: GPT-4o</p>
-                <p>{metrics.llm_insights?.length ?? 0} insights generated</p>
+            <div className="bg-gradient-to-r from-primary/10 to-transparent px-6 py-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wider text-primary flex items-center gap-2">
+                    <Lightbulb className="h-4 w-4" />
+                    GPT-4o Analysis
+                  </p>
+                  <h3 className="text-xl font-bold mt-1">
+                    {primaryDiscrepancy?.customer ?? "Contract Intelligence"}
+                  </h3>
+                </div>
+                <div className="flex gap-2">
+                  <Button variant="secondary" size="sm" className="gap-2">
+                    <MessageSquare className="h-4 w-4" />
+                    Ask Follow-up
+                  </Button>
+                  <Button 
+                    variant="secondary" 
+                    size="sm" 
+                    className="gap-2"
+                    onClick={() => {
+                      navigator.clipboard.writeText(patternSummary);
+                      toast({ title: "Analysis copied to clipboard" });
+                    }}
+                  >
+                    <Copy className="h-4 w-4" />
+                    Copy Analysis
+                  </Button>
+                </div>
               </div>
             </div>
+
             <div className="grid md:grid-cols-[2fr_1fr] divide-y md:divide-y-0 md:divide-x divide-border/60">
-              <div className="p-6 max-h-80 overflow-auto pr-2">
-                {/* 🔥 NEW: Invoice breakdown */}
-                {discrepancies.length > 1 && (
-                  <div className="mb-4 p-3 rounded-lg border border-border/60 bg-secondary/30 text-xs">
-                    <p className="font-semibold text-foreground mb-2">Affected Invoices:</p>
-                    <div className="space-y-1">
-                      {discrepancies.slice(0, 6).map((disc, idx) => (
-                        <div key={idx} className="flex justify-between">
-                          <span className="text-muted-foreground">
-                            {disc.invoice_date ? new Date(disc.invoice_date).toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : 'N/A'}
-                          </span>
-                          <span className="font-mono text-destructive">
-                            {formatCurrency(disc.value ?? 0, contractCurrency)}
-                          </span>
-                        </div>
-                      ))}
-                      {discrepancies.length > 6 && (
-                        <p className="text-muted-foreground italic">
-                          ... and {discrepancies.length - 6} more
-                        </p>
-                      )}
-                    </div>
-                    <div className="mt-2 pt-2 border-t border-border/40 flex justify-between font-semibold">
-                      <span className="text-foreground">Total:</span>
-                      <span className="text-destructive">
-                        {formatCurrency(recoverableAmount, contractCurrency)}
-                      </span>
-                    </div>
+              {/* Left: AI Summary */}
+              <div className="p-6 max-h-80 overflow-auto">
+                {/* Key findings as clickable chips */}
+                {discrepancies.length > 0 && (
+                  <div className="flex flex-wrap gap-2 mb-4">
+                    <button className="px-3 py-1.5 rounded-full bg-destructive/10 text-destructive text-xs font-semibold hover:bg-destructive/20 transition-colors">
+                      {discrepancies.length} {discrepancies.length === 1 ? "escalation missed" : "escalations missed"}
+                    </button>
+                    <button className="px-3 py-1.5 rounded-full bg-cta/10 text-cta text-xs font-semibold hover:bg-cta/20 transition-colors">
+                      {formatCurrency(recoverableAmount, contractCurrency)} at risk
+                    </button>
+                    {groupedDiscrepancies.length > 0 && (
+                      <button className="px-3 py-1.5 rounded-full bg-primary/10 text-primary text-xs font-semibold hover:bg-primary/20 transition-colors">
+                        Spans {groupedDiscrepancies[0]?.count || discrepancies.length} {groupedDiscrepancies[0]?.count === 1 ? "month" : "months"}
+                      </button>
+                    )}
                   </div>
                 )}
-                
+
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
                   className="prose prose-invert prose-sm leading-relaxed space-y-3"
                 >
                   {patternSummary}
                 </ReactMarkdown>
+
+                {/* Confidence indicator */}
+                {clauseHits > 0 && (
+                  <div className="mt-4 p-3 rounded-lg bg-success/10 border border-success/20">
+                    <div className="flex items-center gap-2 text-sm">
+                      <CheckCircle2 className="h-4 w-4 text-success" />
+                      <span className="font-semibold">High confidence analysis</span>
+                      <span className="text-muted-foreground ml-auto">
+                        Based on {clauseHits} clause {clauseHits === 1 ? "hit" : "hits"} + {billingSummary.invoice_count || 0} {billingSummary.invoice_count === 1 ? "invoice" : "invoices"}
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
+
+              {/* Right: Actions */}
               <div className="p-6 space-y-4 bg-secondary/20">
-                <div className="rounded-2xl border border-border/60 bg-background/70 p-4 text-sm text-muted-foreground">
-                  <p className="font-semibold text-foreground mb-1">Suggestion</p>
-                  Correlate clause hits with billing gaps to trigger alerts before renewals. Automate a CPI guardrail
-                  for {primaryDiscrepancy?.customer ?? "customer"}'s renewal workflow.
+                {/* Quick actions as cards */}
+                <div className="space-y-3">
+                  <button className="w-full text-left p-3 rounded-lg bg-background/70 border border-border hover:border-primary transition-colors">
+                    <div className="flex items-center gap-3">
+                      <div className="h-10 w-10 rounded-lg bg-destructive/10 flex items-center justify-center">
+                        <Mail className="h-5 w-5 text-destructive" />
+                      </div>
+                      <div>
+                        <p className="font-semibold text-sm">Draft Recovery Email</p>
+                        <p className="text-xs text-muted-foreground">
+                          Request {formatCurrency(recoverableAmount, contractCurrency)} from {primaryDiscrepancy?.customer || "customer"}
+                        </p>
+                      </div>
+                    </div>
+                  </button>
+
+                  <button className="w-full text-left p-3 rounded-lg bg-background/70 border border-border hover:border-primary transition-colors">
+                    <div className="flex items-center gap-3">
+                      <div className="h-10 w-10 rounded-lg bg-cta/10 flex items-center justify-center">
+                        <BellRing className="h-5 w-5 text-cta" />
+                      </div>
+                      <div>
+                        <p className="font-semibold text-sm">Create Alert Rule</p>
+                        <p className="text-xs text-muted-foreground">
+                          Auto-flag future escalation gaps
+                        </p>
+                      </div>
+                    </div>
+                  </button>
+
+                  <button className="w-full text-left p-3 rounded-lg bg-background/70 border border-border hover:border-primary transition-colors">
+                    <div className="flex items-center gap-3">
+                      <div className="h-10 w-10 rounded-lg bg-primary/10 flex items-center justify-center">
+                        <FileText className="h-5 w-5 text-primary" />
+                      </div>
+                      <div>
+                        <p className="font-semibold text-sm">Schedule Follow-up</p>
+                        <p className="text-xs text-muted-foreground">
+                          Audit {primaryDiscrepancy?.customer || "vendor"} again in 30 days
+                        </p>
+                      </div>
+                    </div>
+                  </button>
                 </div>
-                <Button variant="secondary" className="w-full gap-2">
-                  <BellRing className="h-4 w-4" />
-                  Create alert rule
-                </Button>
               </div>
             </div>
           </div>
@@ -1552,29 +1682,101 @@ const chartFriendlyLabel = {
           <div className="rounded-3xl border border-border bg-card/90 shadow-hover p-6 space-y-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm text-muted-foreground">Vendor risk scorecard</p>
+                <p className="text-sm text-muted-foreground">Vendor risk assessment</p>
                 <h3 className="text-2xl font-semibold">{analysis?.job.vendor_name}</h3>
               </div>
               {vendorRisk && (
                 <div className="text-right">
-                  <p className="text-4xl font-bold text-foreground">{vendorRisk.score}</p>
-                  <p
-                    className={`text-xs font-semibold ${
-                      vendorRisk.level === "High"
-                        ? "text-destructive"
-                        : vendorRisk.level === "Medium"
-                          ? "text-cta"
-                          : "text-success"
-                    }`}
-                  >
-                    {vendorRisk.level} risk
-                  </p>
+                  {/* Circular progress indicator */}
+                  <div className="relative w-24 h-24">
+                    <svg className="w-24 h-24 transform -rotate-90">
+                      <circle
+                        cx="48"
+                        cy="48"
+                        r="40"
+                        stroke="currentColor"
+                        strokeWidth="8"
+                        fill="none"
+                        className="text-secondary"
+                      />
+                      <circle
+                        cx="48"
+                        cy="48"
+                        r="40"
+                        stroke="currentColor"
+                        strokeWidth="8"
+                        fill="none"
+                        strokeDasharray={`${(vendorRisk.score / 100) * 251.2} 251.2`}
+                        className={vendorRisk.level === "High" ? "text-destructive" : vendorRisk.level === "Medium" ? "text-cta" : "text-success"}
+                      />
+                    </svg>
+                    <div className="absolute inset-0 flex flex-col items-center justify-center">
+                      <p className="text-3xl font-bold">{vendorRisk.score}</p>
+                      <p className="text-[10px] uppercase text-muted-foreground">Risk</p>
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
             {vendorRisk && (
               <>
-                <p className="text-sm text-muted-foreground">{vendorRisk.summary}</p>
+                {/* Risk level explanation */}
+                <div className={`p-3 rounded-lg border ${
+                  vendorRisk.level === "High"
+                    ? "bg-destructive/10 border-destructive/20"
+                    : vendorRisk.level === "Medium"
+                      ? "bg-cta/10 border-cta/20"
+                      : "bg-success/10 border-success/20"
+                }`}>
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className={`h-5 w-5 mt-0.5 ${
+                      vendorRisk.level === "High"
+                        ? "text-destructive"
+                        : vendorRisk.level === "Medium"
+                          ? "text-cta"
+                          : "text-success"
+                    }`} />
+                    <div>
+                      <p className={`font-semibold text-sm ${
+                        vendorRisk.level === "High"
+                          ? "text-destructive"
+                          : vendorRisk.level === "Medium"
+                            ? "text-cta"
+                            : "text-success"
+                      }`}>
+                        {vendorRisk.level} Risk {vendorRisk.level === "High" ? "(75-100)" : vendorRisk.level === "Medium" ? "(55-74)" : "(0-54)"}
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {vendorRisk.summary}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Comparison to industry average */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-muted-foreground">Industry average risk:</span>
+                    <span className="font-semibold">45</span>
+                  </div>
+                  <div className="h-2 bg-secondary rounded-full overflow-hidden">
+                    <div 
+                      className={`h-full bg-gradient-to-r ${
+                        vendorRisk.score >= 75
+                          ? "from-destructive to-destructive/80"
+                          : vendorRisk.score >= 55
+                            ? "from-cta to-cta/80"
+                            : "from-success to-success/80"
+                      }`}
+                      style={{ width: `${Math.min(100, vendorRisk.score)}%` }}
+                    />
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    This vendor is {Math.abs(vendorRisk.score - 45)} points {vendorRisk.score > 45 ? "above" : "below"} average
+                  </p>
+                </div>
+
+                {/* Existing metrics grid */}
                 <div className="grid grid-cols-3 gap-3 text-sm text-muted-foreground">
                   <div className="rounded-2xl border border-border/60 p-3">
                     <p className="text-xs uppercase tracking-widest">Leakage</p>

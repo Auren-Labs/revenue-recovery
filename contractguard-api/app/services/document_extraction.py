@@ -25,6 +25,7 @@ except ImportError:
 
 from app.config import get_settings
 from app.services import job_manager, rag_store
+from app.services import openai_rate_limit
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -90,6 +91,15 @@ class GPT4oDocumentEnhancer:
         client = self._create_client()
         if not client:
             return {}
+        
+        # ✅ CHECK rate limit BEFORE calling API
+        is_allowed, error_msg = openai_rate_limit.check_openai_rate_limit(
+            self.customer_id,
+            self.job_id
+        )
+        if not is_allowed:
+            logger.warning(f"OpenAI rate limit hit for job {self.job_id}: {error_msg}")
+            return {}  # Return empty dict if rate limited
         
         prompt = f"""You are analyzing a service contract to extract precise pricing and escalation terms.
 
@@ -164,6 +174,15 @@ CRITICAL RULES:
                     max_tokens=2000,
                 ),
             )
+            
+            # ✅ RECORD the call
+            tokens_used = response.usage.total_tokens if response.usage else 0
+            openai_rate_limit.record_openai_call(
+                self.customer_id,
+                self.job_id,
+                tokens_used
+            )
+            
             response_text = response.choices[0].message.content.strip()
             if response_text.startswith("```"):
                 response_text = response_text.split("```")[1]
@@ -200,6 +219,15 @@ CRITICAL RULES:
         client = self._create_client()
         if not client:
             return {"validated": True, "confidence": 0.7}
+
+        # ✅ CHECK rate limit BEFORE calling API
+        is_allowed, error_msg = openai_rate_limit.check_openai_rate_limit(
+            self.customer_id,
+            self.job_id
+        )
+        if not is_allowed:
+            logger.warning(f"OpenAI rate limit hit for job {self.job_id}: {error_msg}")
+            return {"validated": True, "confidence": 0.7}  # Default to validated if rate limited
 
         try:
             prompt = f"""You are validating a contract clause detection.
@@ -238,6 +266,14 @@ Respond with ONLY valid JSON:
                     temperature=0.1,
                     max_tokens=500,
                 ),
+            )
+            
+            # ✅ RECORD the call
+            tokens_used = response.usage.total_tokens if response.usage else 0
+            openai_rate_limit.record_openai_call(
+                self.customer_id,
+                self.job_id,
+                tokens_used
             )
             
             response_text = response.choices[0].message.content.strip()

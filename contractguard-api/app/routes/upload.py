@@ -59,6 +59,45 @@ async def submit_job(job_id: str, current_user=Depends(require_user)) -> UploadR
     return UploadResponse(job_id=job_id, message="Audit is running. You will see metrics on the dashboard shortly.")
 
 
+@router.post("/{job_id}/retry", response_model=UploadResponse)
+async def retry_job(job_id: str, current_user=Depends(require_user)) -> UploadResponse:
+    """
+    Retry a failed audit job.
+    
+    This endpoint:
+    - Validates the job exists and belongs to the user
+    - Resets job status to "queued"
+    - Enqueues the job for background processing (returns immediately)
+    
+    Returns:
+        Success message with job_id
+    """
+    customer_id = current_user.get("organization_id") or current_user.get("customer_id")
+    if not customer_id:
+        raise HTTPException(status_code=400, detail="Customer ID not found in token")
+    
+    job = job_manager.get_job(job_id, customer_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    
+    if job.status not in ["failed", "completed"]:
+        raise HTTPException(status_code=400, detail="Can only retry failed or completed jobs.")
+    
+    if not job.contracts:
+        raise HTTPException(status_code=400, detail="Contracts missing.")
+    if not job.billing_records:
+        raise HTTPException(status_code=400, detail="Billing data missing.")
+    
+    # Reset job status and enqueue for background processing
+    job_manager.set_job_status(job, "queued", "Retrying audit...")
+    job_manager.update_progress(job_id, 0, "Queued for retry...")
+    
+    # Enqueue to Celery (returns immediately)
+    job_manager.enqueue_job(job_id)
+    
+    return UploadResponse(job_id=job_id, message="Audit retry initiated. Processing will begin shortly.")
+
+
 @router.get("/history")
 async def audit_history(
     limit: int = 50,

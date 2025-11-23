@@ -173,6 +173,94 @@ class AuthService:
         token = self.create_access_token(user, customer)
         return user, customer, token
 
+    async def update_user_profile(self, user_id: str, full_name: Optional[str] = None, email: Optional[str] = None) -> User:
+        """Update user profile information."""
+        if not self.supabase:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Database connection not available"
+            )
+        
+        # Check if email is already taken by another user
+        if email:
+            existing_user = await self.get_user_by_email(email)
+            if existing_user and existing_user.id != user_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Email already in use"
+                )
+        
+        update_data = {"updated_at": datetime.utcnow().isoformat()}
+        if full_name is not None:
+            update_data["full_name"] = full_name
+        if email is not None:
+            update_data["email"] = email
+        
+        try:
+            self.supabase.table("users").update(update_data).eq("id", user_id).execute()
+            updated_user = await self.get_user_by_id(user_id)
+            if not updated_user:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="User not found"
+                )
+            return updated_user
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to update user profile: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to update profile"
+            )
+
+    async def change_password(self, user_id: str, current_password: str, new_password: str) -> bool:
+        """Change user password."""
+        if not self.supabase:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Database connection not available"
+            )
+        
+        # Get current password hash
+        response = self.supabase.table("users").select("password_hash").eq("id", user_id).execute()
+        if not response.data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        password_hash = response.data[0].get("password_hash")
+        
+        # Check if user has a password (not a Google-only user)
+        if password_hash is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This account uses Google Sign-In. Password cannot be changed."
+            )
+        
+        # Verify current password
+        if not self.verify_password(current_password, password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Current password is incorrect"
+            )
+        
+        # Hash and update new password
+        new_password_hash = self.hash_password(new_password)
+        try:
+            self.supabase.table("users").update({
+                "password_hash": new_password_hash,
+                "updated_at": datetime.utcnow().isoformat()
+            }).eq("id", user_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to change password: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to change password"
+            )
+
     async def authenticate_google(self, google_access_token: str) -> tuple[User, Customer, str]:
         """Authenticate user with Google OAuth access token."""
         try:

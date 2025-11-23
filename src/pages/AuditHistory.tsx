@@ -15,8 +15,21 @@ import {
   Trash2,
   Download,
   FileDown,
+  Search,
+  Filter,
+  X,
+  RefreshCw,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Dialog,
   DialogContent,
@@ -51,11 +64,18 @@ interface AuditJob {
 export default function AuditHistory() {
   const navigate = useNavigate();
   const [audits, setAudits] = useState<AuditJob[]>([]);
+  const [allAudits, setAllAudits] = useState<AuditJob[]>([]); // Store all audits for filtering
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [auditToDelete, setAuditToDelete] = useState<AuditJob | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [retrying, setRetrying] = useState<string | null>(null);
+  
+  // Search and filter state
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [sortBy, setSortBy] = useState<string>("newest");
 
   useEffect(() => {
     // Check authentication before fetching
@@ -71,6 +91,36 @@ export default function AuditHistory() {
     e.stopPropagation(); // Prevent navigation when clicking delete
     setAuditToDelete(audit);
     setDeleteDialogOpen(true);
+  };
+
+  const handleRetry = async (audit: AuditJob, e: React.MouseEvent) => {
+    e.stopPropagation();
+    
+    try {
+      setRetrying(audit.id);
+      const response = await fetch(`${API_BASE}/upload/${audit.id}/retry`, {
+        method: "POST",
+        headers: {
+          ...getAuthHeader(),
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || "Failed to retry audit");
+      }
+
+      // Refresh the list
+      await fetchAuditHistory();
+      
+      // Navigate to dashboard to see the retry in progress
+      navigate(`/dashboard?job=${audit.id}`);
+    } catch (err: any) {
+      setError(err.message || "Failed to retry audit");
+    } finally {
+      setRetrying(null);
+    }
   };
 
   const handleDeleteConfirm = async () => {
@@ -139,6 +189,7 @@ export default function AuditHistory() {
       }
 
       const data = await response.json();
+      setAllAudits(data.jobs || []);
       setAudits(data.jobs || []);
     } catch (err: any) {
       setError(err.message || "Failed to load audit history");
@@ -146,6 +197,47 @@ export default function AuditHistory() {
       setLoading(false);
     }
   };
+
+  // Filter and sort audits
+  useEffect(() => {
+    let filtered = [...allAudits];
+    
+    // Search filter
+    if (searchQuery.trim()) {
+      const query = searchQuery.toLowerCase();
+      filtered = filtered.filter(
+        (audit) =>
+          audit.vendor_name.toLowerCase().includes(query) ||
+          audit.id.toLowerCase().includes(query)
+      );
+    }
+    
+    // Status filter
+    if (statusFilter !== "all") {
+      filtered = filtered.filter((audit) => audit.status === statusFilter);
+    }
+    
+    // Sort
+    filtered.sort((a, b) => {
+      const dateA = new Date(a.created_at).getTime();
+      const dateB = new Date(b.created_at).getTime();
+      
+      switch (sortBy) {
+        case "newest":
+          return dateB - dateA;
+        case "oldest":
+          return dateA - dateB;
+        case "amount_high":
+          return (b.recoverable_amount || 0) - (a.recoverable_amount || 0);
+        case "amount_low":
+          return (a.recoverable_amount || 0) - (b.recoverable_amount || 0);
+        default:
+          return dateB - dateA;
+      }
+    });
+    
+    setAudits(filtered);
+  }, [allAudits, searchQuery, statusFilter, sortBy]);
 
   const formatDate = (dateString: string) => {
     const date = new Date(dateString);
@@ -260,6 +352,79 @@ export default function AuditHistory() {
           </p>
         </div>
 
+        {/* Search and Filter Bar */}
+        <div className="bg-card rounded-lg border border-border p-4 mb-6">
+          <div className="flex flex-col md:flex-row gap-4">
+            {/* Search */}
+            <div className="flex-1 relative">
+              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                placeholder="Search by vendor name or audit ID..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="pl-10"
+              />
+              {searchQuery && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="absolute right-1 top-1/2 transform -translate-y-1/2 h-8 w-8 p-0"
+                  onClick={() => setSearchQuery("")}
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              )}
+            </div>
+
+            {/* Status Filter */}
+            <Select value={statusFilter} onValueChange={setStatusFilter}>
+              <SelectTrigger className="w-full md:w-[180px]">
+                <Filter className="h-4 w-4 mr-2" />
+                <SelectValue placeholder="Filter by status" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Status</SelectItem>
+                <SelectItem value="completed">Completed</SelectItem>
+                <SelectItem value="failed">Failed</SelectItem>
+                <SelectItem value="in_progress">In Progress</SelectItem>
+                <SelectItem value="queued">Queued</SelectItem>
+              </SelectContent>
+            </Select>
+
+            {/* Sort */}
+            <Select value={sortBy} onValueChange={setSortBy}>
+              <SelectTrigger className="w-full md:w-[180px]">
+                <SelectValue placeholder="Sort by" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="newest">Newest First</SelectItem>
+                <SelectItem value="oldest">Oldest First</SelectItem>
+                <SelectItem value="amount_high">Highest Amount</SelectItem>
+                <SelectItem value="amount_low">Lowest Amount</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* Results count */}
+          {(searchQuery || statusFilter !== "all") && (
+            <div className="mt-4 text-sm text-muted-foreground">
+              Showing {audits.length} of {allAudits.length} audits
+              <Button
+                variant="ghost"
+                size="sm"
+                className="ml-2 h-auto p-0 text-primary"
+                onClick={() => {
+                  setSearchQuery("");
+                  setStatusFilter("all");
+                  setSortBy("newest");
+                }}
+              >
+                Clear filters
+              </Button>
+            </div>
+          )}
+        </div>
+
         {/* Audit List */}
         {audits.length === 0 ? (
           <div className="bg-card rounded-lg border border-border p-12 text-center">
@@ -349,6 +514,22 @@ export default function AuditHistory() {
                   </div>
 
                   <div className="flex items-center gap-2 ml-4">
+                    {audit.status === "failed" && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-primary hover:text-primary hover:bg-primary/10"
+                        onClick={(e) => handleRetry(audit, e)}
+                        disabled={retrying === audit.id}
+                        title="Retry this audit"
+                      >
+                        {retrying === audit.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <RefreshCw className="h-4 w-4" />
+                        )}
+                      </Button>
+                    )}
                     {audit.status === "completed" && (
                       <>
                         <Button

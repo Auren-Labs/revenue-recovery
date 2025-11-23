@@ -15,6 +15,7 @@ import {
   Lock,
   Download,
   History,
+  Settings,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -224,6 +225,10 @@ const UploadPage = () => {
             <Button variant="ghost" size="sm" onClick={() => navigate("/history")}>
               <History className="h-4 w-4 mr-2" />
               View History
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => navigate("/settings")}>
+              <Settings className="h-4 w-4 mr-2" />
+              Settings
             </Button>
             <Button variant="ghost" size="sm" onClick={handleLogout}>
               Logout
