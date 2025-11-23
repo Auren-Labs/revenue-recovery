@@ -1,7 +1,40 @@
 import { Button } from "@/components/ui/button";
 import ThemeToggle from "@/components/ThemeToggle";
+import { useNavigate } from "react-router-dom";
+import { isAuthenticated, logout } from "@/utils/auth";
+import { useState, useEffect } from "react";
 
 const Header = () => {
+  const navigate = useNavigate();
+  const [authenticated, setAuthenticated] = useState(isAuthenticated());
+
+  // Check authentication status on mount and when returning to the page
+  useEffect(() => {
+    const checkAuth = () => {
+      setAuthenticated(isAuthenticated());
+    };
+    
+    // Check on mount
+    checkAuth();
+    
+    // Check when window gains focus (user returns to tab)
+    window.addEventListener('focus', checkAuth);
+    
+    // Check periodically (every 2 seconds)
+    const interval = setInterval(checkAuth, 2000);
+    
+    return () => {
+      window.removeEventListener('focus', checkAuth);
+      clearInterval(interval);
+    };
+  }, []);
+
+  const handleLogout = () => {
+    logout();
+    setAuthenticated(false);
+    navigate("/");
+  };
+
   const scrollToSection = (id: string) => {
     const element = document.getElementById(id);
     if (element) {
@@ -40,13 +73,41 @@ const Header = () => {
 
           <div className="flex items-center gap-3">
             <ThemeToggle />
-            <Button 
-              variant="cta" 
-              size="default"
-              onClick={() => scrollToSection("waitlist")}
-            >
-              Start Free Audit
-            </Button>
+            {authenticated ? (
+              <>
+                <Button 
+                  variant="outline" 
+                  size="default"
+                  onClick={() => navigate("/dashboard")}
+                >
+                  Dashboard
+                </Button>
+                <Button 
+                  variant="ghost" 
+                  size="default"
+                  onClick={handleLogout}
+                >
+                  Logout
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button 
+                  variant="ghost" 
+                  size="default"
+                  onClick={() => navigate("/login")}
+                >
+                  Login
+                </Button>
+                <Button 
+                  variant="cta" 
+                  size="default"
+                  onClick={() => scrollToSection("waitlist")}
+                >
+                  Start Free Audit
+                </Button>
+              </>
+            )}
           </div>
         </div>
       </div>

@@ -52,12 +52,21 @@ CURRENCY_PATTERN = re.compile(r"\b(?:USD|INR|EUR|GBP|\$|₹|€|£)\b")
 class GPT4oDocumentEnhancer:
     """Uses GPT-4o to enhance and validate document extraction on a per-job basis."""
     
-    def __init__(self):
+    def __init__(self, customer_id: str, job_id: str):
+        """
+        Initialize enhancer with tenant isolation.
+        
+        Args:
+            customer_id: Customer ID for tenant isolation
+            job_id: Job ID for context
+        """
+        self.customer_id = customer_id
+        self.job_id = job_id
         self.enabled = False
         self.api_key = getattr(settings, "openai_api_key", None)
         if OpenAI and self.api_key:
             self.enabled = True
-            logger.info("GPT-4o document enhancer enabled")
+            logger.info(f"GPT-4o document enhancer enabled (customer: {customer_id[:8]}...)")
         else:
             logger.info("GPT-4o enhancer disabled (missing openai library or API key)")
 
@@ -298,8 +307,8 @@ Respond with ONLY valid JSON:
             return ""
 
 
-# Initialize global enhancer
-_gpt4o_enhancer = GPT4oDocumentEnhancer()
+# Enhancer is now instantiated per-job for tenant isolation
+# No global instance
 
 
 # --- Existing Azure Document Intelligence Functions (Enhanced) ---
@@ -409,7 +418,8 @@ def _normalize_region(region: Any, page_meta: Dict[str, float] | None) -> Dict[s
 async def _extract_clause_hits_enhanced(
     paragraphs: List[Any],
     page_meta: Dict[int, Dict[str, float]],
-    full_text: str
+    full_text: str,
+    enhancer: GPT4oDocumentEnhancer
 ) -> List[Dict[str, Any]]:
     """Enhanced clause extraction with GPT-4o validation."""
     hits: List[Dict[str, Any]] = []
@@ -437,7 +447,7 @@ async def _extract_clause_hits_enhanced(
         currency = _extract_currency(text)
         
         # 🔥 NEW: Validate and enhance with GPT-4o
-        validation = await _gpt4o_enhancer.validate_clause(
+        validation = await enhancer.validate_clause(
             clause_text=text,
             detected_label=label,
             context=full_text[max(0, full_text.find(text) - 200):full_text.find(text) + len(text) + 200]
@@ -493,7 +503,7 @@ def _normalize_table(table: Any) -> Dict[str, Any]:
     }
 
 
-async def _summarize_result_enhanced(result: Any, full_text: str) -> Dict[str, Any]:
+async def _summarize_result_enhanced(result: Any, full_text: str, enhancer: GPT4oDocumentEnhancer) -> Dict[str, Any]:
     """Enhanced summarization with GPT-4o clause extraction."""
     page_meta = _build_page_map(result)
     
@@ -517,7 +527,8 @@ async def _summarize_result_enhanced(result: Any, full_text: str) -> Dict[str, A
     clause_hits = await _extract_clause_hits_enhanced(
         getattr(result, "paragraphs", []) or [],
         page_meta,
-        full_text
+        full_text,
+        enhancer
     )
     
     tables = [_normalize_table(table) for table in (getattr(result, "tables", []) or [])[:3]]
@@ -538,7 +549,7 @@ async def _summarize_result_enhanced(result: Any, full_text: str) -> Dict[str, A
     }
 
 
-async def _analyze_document(client: DocumentIntelligenceClient, document_meta: Dict[str, Any]) -> Dict[str, Any]:
+async def _analyze_document(client: DocumentIntelligenceClient, document_meta: Dict[str, Any], enhancer: GPT4oDocumentEnhancer) -> Dict[str, Any]:
     """Enhanced document analysis with GPT-4o."""
     local_path = Path(document_meta.get("local_path", ""))
     if not local_path.exists():
@@ -566,10 +577,10 @@ async def _analyze_document(client: DocumentIntelligenceClient, document_meta: D
         )
     
     # Enhanced summarization with GPT-4o validation
-    summary = await _summarize_result_enhanced(result, full_text)
+    summary = await _summarize_result_enhanced(result, full_text, enhancer)
     
     # 🔥 NEW: Extract structured contract terms with GPT-4o
-    contract_terms = await _gpt4o_enhancer.extract_contract_terms(
+    contract_terms = await enhancer.extract_contract_terms(
         full_text,
         document_meta.get("filename", "")
     )
@@ -587,6 +598,10 @@ async def run(job, documents: List[Dict]) -> Dict:
     """Enhanced document extraction pipeline with GPT-4o."""
     await job_manager.simulate_latency(0.1)
     extracted_docs: List[Dict[str, Any]] = []
+
+    # Create tenant-isolated enhancer
+    customer_id = job.customer_id or "default"
+    gpt4o_enhancer = GPT4oDocumentEnhancer(customer_id=customer_id, job_id=job.id)
 
     if not documents:
         job.metrics["documents"] = []
@@ -617,10 +632,10 @@ async def run(job, documents: List[Dict]) -> Dict:
                             contract_text = "\n".join(page.extract_text() for page in pdf_reader.pages)
                     except:
                         # Fallback to GPT-4o vision for images/scanned PDFs
-                        contract_text = await _gpt4o_enhancer.extract_from_image(local_path)
+                        contract_text = await gpt4o_enhancer.extract_from_image(local_path)
                 
                 # Extract with GPT-4o
-                contract_terms = await _gpt4o_enhancer.extract_contract_terms(
+                contract_terms = await gpt4o_enhancer.extract_contract_terms(
                     contract_text,
                     doc.get("filename", "")
                 )
@@ -652,7 +667,7 @@ async def run(job, documents: List[Dict]) -> Dict:
     async with client:
         for document_meta in documents:
             try:
-                summary = await _analyze_document(client, document_meta)
+                summary = await _analyze_document(client, document_meta, gpt4o_enhancer)
                 extracted_docs.append(summary)
             except (AzureError, OSError) as exc:
                 logger.exception("Document extraction failed for %s: %s", document_meta.get("filename"), exc)

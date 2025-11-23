@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     redis_broker_url: str = "redis://localhost:6379/0"
     redis_result_backend: str = "redis://localhost:6379/1"
 
+    # Email/SMTP settings
+    smtp_host: Optional[str] = None
+    smtp_port: int = 587
+    smtp_user: Optional[str] = None
+    smtp_password: Optional[str] = None
+    smtp_from: Optional[str] = None
+    smtp_to: Optional[str] = None  # Default recipient if user email not available
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

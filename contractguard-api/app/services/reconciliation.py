@@ -335,12 +335,21 @@ def _parse_date(value: Any) -> date | None:
 # ============================================================================
 
 class IntelligentClassifier:
-    """Production-grade GPT-4o classifier with caching and fast paths."""
+    """Production-grade GPT-4o classifier with tenant-isolated caching."""
     
-    def __init__(self):
+    def __init__(self, customer_id: str, job_id: str):
+        """
+        Initialize classifier with tenant isolation.
+        
+        Args:
+            customer_id: Customer ID for cache isolation
+            job_id: Job ID for additional context
+        """
+        self.customer_id = customer_id
+        self.job_id = job_id
         self.client = None
         self.enabled = False
-        self.cache = {}
+        self.cache = {}  # Per-instance cache (isolated by customer)
         
         api_key = settings.openai_api_key if hasattr(settings, 'openai_api_key') else None
         if AsyncOpenAI and api_key:
@@ -571,8 +580,8 @@ JSON only: {{"classification": "RECURRING|ONE_TIME|ADJUSTMENT", "confidence": 0.
             return (True, 0.5, f"Validation failed: {str(e)}", "review")
 
 
-# Initialize global classifier
-_classifier = IntelligentClassifier()
+# Classifier is now instantiated per-job for tenant isolation
+# No global instance
 
 
 # ============================================================================
@@ -670,7 +679,8 @@ def _load_billing_rows(job) -> List[Dict[str, Any]]:
 
 async def _parse_invoice_items(
     rows: List[Dict[str, Any]],
-    contract_keywords: List[str]
+    contract_keywords: List[str],
+    classifier: IntelligentClassifier
 ) -> List[InvoiceLineItem]:
     """Parse and classify all invoice line items."""
     logger.info(f"Parsing {len(rows)} invoice rows...")
@@ -694,7 +704,7 @@ async def _parse_invoice_items(
     
     # Batch classify all items
     classifications = await asyncio.gather(*[
-        _classifier.classify_line_item(desc, amt, inv_date, contract_keywords)
+        classifier.classify_line_item(desc, amt, inv_date, contract_keywords)
         for _, desc, amt, _, inv_date, _ in tasks
     ])
     
@@ -730,7 +740,8 @@ async def _parse_invoice_items(
 async def _audit_escalation_clause(
     invoice_items: List[InvoiceLineItem],
     rules: ContractRules,
-    documents: List[Dict[str, Any]]
+    documents: List[Dict[str, Any]],
+    classifier: IntelligentClassifier
 ) -> List[Discrepancy]:  # 🔥 Changed: Returns List instead of Optional
     """
     Audit for missing price escalations.
@@ -781,7 +792,7 @@ async def _audit_escalation_clause(
                 continue
             
             # For other cases, validate with GPT-4o
-            is_valid, validation_confidence, reason, action = await _classifier.validate_discrepancy(
+            is_valid, validation_confidence, reason, action = await classifier.validate_discrepancy(
                 item,
                 expected_rate,
                 f"Base: {rules.base_amount}, Escalation: {rules.escalation_rate*100}%, Effective: {rules.effective_start_date}"
@@ -1035,8 +1046,9 @@ async def run(job, llm_insights: Dict) -> Dict:
     
     start_time = datetime.now()
     
-    # Reset classifier cache
-    _classifier.reset()
+    # Create tenant-isolated classifier
+    customer_id = job.customer_id or "default"
+    _classifier = IntelligentClassifier(customer_id=customer_id, job_id=job.id)
     
     # Step 1: Load billing data
     logger.info("[1/5] Loading billing data...")
@@ -1049,7 +1061,7 @@ async def run(job, llm_insights: Dict) -> Dict:
     
     # Step 3: Parse and classify invoice items
     logger.info("[3/5] Classifying invoice line items...")
-    invoice_items = await _parse_invoice_items(billing_rows, rules.invoice_keywords)
+    invoice_items = await _parse_invoice_items(billing_rows, rules.invoice_keywords, _classifier)
     
     # Step 4: Run intelligent audits
     logger.info("[4/5] Running intelligent audits...")
@@ -1059,7 +1071,7 @@ async def run(job, llm_insights: Dict) -> Dict:
     discrepancies = []
     
     # Audit 1: Price escalation (now returns List[Discrepancy])
-    escalation_discrepancies = await _audit_escalation_clause(invoice_items, rules, documents)
+    escalation_discrepancies = await _audit_escalation_clause(invoice_items, rules, documents, _classifier)
     discrepancies.extend(escalation_discrepancies)  # 🔥 Use extend instead of append
     
     # Audit 2: SLA credits (only if evidence of issues)

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, useRef, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   AlertTriangle,
   Layers,
@@ -22,6 +23,7 @@ import {
   TrendingUp,
   TrendingDown,
 } from "lucide-react";
+import { getAuthHeader, logout } from "@/utils/auth";
 import { ChartStyle, ChartConfig } from "@/components/ui/chart";
 import {
   Area,
@@ -54,7 +56,7 @@ import { PerformanceMetrics } from "@/components/PerformanceMetrics";
 import { EmptyState } from "@/components/EmptyState";
 import { DashboardSkeleton } from "@/components/LoadingSkeleton";
 import { CustomerDrillDown } from "@/components/CustomerDrillDown";
-import { HelpCircle, Upload, FileSearch, CheckCircle2 } from "lucide-react";
+import { HelpCircle, Upload, FileSearch, CheckCircle2, History, Download, FileDown } from "lucide-react";
 
 if (pdfjs?.GlobalWorkerOptions) {
   pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
@@ -261,22 +263,10 @@ const teamStats = [
   { label: "Avg resolution time", value: "2.3 days" },
 ];
 
+import { formatCurrency as formatCurrencyUtil } from "@/utils/currency";
+
 const formatCurrency = (value: number | undefined, currencyCode?: string, options?: Intl.NumberFormatOptions) => {
-  const currency = currencyCode || "INR";
-  const symbols: Record<string, string> = {
-    'INR': '₹',
-    'USD': '$',
-    'EUR': '€',
-    'GBP': '£'
-  };
-  
-  const symbol = symbols[currency] || currency;
-  const formattedNumber = new Intl.NumberFormat("en-US", { 
-    maximumFractionDigits: 0, 
-    ...options 
-  }).format(value ?? 0);
-  
-  return `${symbol}${formattedNumber}`;
+  return formatCurrencyUtil(value ?? 0, currencyCode || "INR", options);
 };
 
 const truncate = (text: string | undefined, length = 140) => {
@@ -294,55 +284,20 @@ const generateMessageId = () => {
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const parseInvoiceDate = (value?: string | null) => {
+// Backend sends ISO dates, so we just parse them directly
+// No complex date parsing needed - backend handles all date formats
+const parseInvoiceDate = (value?: string | null): Date | null => {
   if (!value) return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-
-  const isoMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (isoMatch) {
-    const [, yearStr, monthStr, dayStr] = isoMatch;
-    const dt = new Date(Number(yearStr), Number(monthStr) - 1, Number(dayStr));
-    if (!Number.isNaN(dt.getTime())) {
-      return dt;
-    }
+  try {
+    const date = new Date(value); // Parse ISO string from backend
+    return Number.isNaN(date.getTime()) ? null : date;
+  } catch {
+    return null;
   }
-
-  const direct = Date.parse(trimmed);
-  if (!Number.isNaN(direct)) {
-    return new Date(direct);
-  }
-
-  const normalized = trimmed.replace(/\./g, "/").replace(/-/g, "/");
-  const parts = normalized.split("/");
-  if (parts.length === 3 && parts.every((part) => part && /^\d+$/.test(part))) {
-    const [first, second, rawYear] = parts.map((part) => parseInt(part, 10));
-    const year = rawYear < 100 ? rawYear + 2000 : rawYear;
-    const candidateOrders = [
-      { month: first, day: second },
-      { month: second, day: first },
-    ];
-    for (const candidate of candidateOrders) {
-      const { month, day } = candidate;
-      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-        const dt = new Date(year, month - 1, day);
-        if (!Number.isNaN(dt.getTime())) return dt;
-      }
-    }
-  }
-
-  const monthNameMatch = trimmed.match(/([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})/);
-  if (monthNameMatch) {
-    const parsed = Date.parse(trimmed.replace(/(\d+)(st|nd|rd|th)/, "$1"));
-    if (!Number.isNaN(parsed)) {
-      return new Date(parsed);
-    }
-  }
-
-  return null;
 };
 
 const Dashboard = () => {
+  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const jobId = searchParams.get("job");
   const [analysis, setAnalysis] = useState<AnalysisSummary | null>(null);
@@ -392,7 +347,10 @@ const Dashboard = () => {
     const controller = new AbortController();
     setLoading(true);
     setError(null);
-    fetch(`${API_BASE}/analysis/${jobId}/summary`, { signal: controller.signal })
+    fetch(`${API_BASE}/analysis/${jobId}/summary`, { 
+      signal: controller.signal,
+      headers: getAuthHeader(),
+    })
       .then(async (res) => {
         if (!res.ok) throw new Error(`Request failed (${res.status})`);
         const payload = (await res.json()) as AnalysisSummary;
@@ -500,17 +458,25 @@ const Dashboard = () => {
     if (!chatInput.trim() || !jobId) return;
     const question = chatInput.trim();
     const assistantId = generateMessageId();
-    setChatMessages((prev) => [
-      ...prev,
-      { id: generateMessageId(), role: "user", content: question },
-      { id: assistantId, role: "assistant", content: "", streaming: true },
-    ]);
+    const MAX_MESSAGES = 50;
+    setChatMessages((prev) => {
+      const newMessages: ChatMessage[] = [
+        ...prev,
+        { id: generateMessageId(), role: "user" as const, content: question },
+        { id: assistantId, role: "assistant" as const, content: "", streaming: true },
+      ];
+      // Keep only last 50 messages to prevent memory leak
+      return newMessages.slice(-MAX_MESSAGES);
+    });
     setChatInput("");
     setChatLoading(true);
     try {
       const res = await fetch(`${API_BASE}/analysis/${jobId}/chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { 
+          "Content-Type": "application/json",
+          ...getAuthHeader(),
+        },
         body: JSON.stringify({ question }),
       });
       if (!res.ok) {
@@ -553,7 +519,14 @@ const Dashboard = () => {
         label: "Recoverable revenue",
         value: formatCurrency(recoverableAmount, contractCurrency),
         delta: `${billingSummary.invoice_count ?? 0} invoices audited`,
-        trend: hasIssues ? "↑ +12% vs last audit" : "No leakage",
+        trend: (() => {
+          if (!hasIssues) return "✓ No leakage";
+          const totalBilled = billingSummary.total_billed || 1;
+          const leakagePercentage = (recoverableAmount / totalBilled) * 100;
+          if (leakagePercentage > 5) return `⚠️ ${leakagePercentage.toFixed(1)}% of total billed`;
+          if (leakagePercentage > 2) return `↑ ${leakagePercentage.toFixed(1)}% leakage rate`;
+          return `→ ${leakagePercentage.toFixed(1)}% leakage rate`;
+        })(),
         icon: Zap,
         priority: "high",
         actionable: false,
@@ -787,9 +760,79 @@ const chartFriendlyLabel = {
     );
   }
 
+  const handleLogout = () => {
+    logout();
+    navigate("/login");
+  };
+
+  const handleExport = async (type: "discrepancies" | "metrics" | "report") => {
+    if (!jobId) {
+      setError("No audit selected for export");
+      return;
+    }
+
+    try {
+      const endpoint = type === "report" ? "report.html" : `${type}.csv`;
+      const url = `${API_BASE}/export/${jobId}/${endpoint}`;
+      
+      const response = await fetch(url, {
+        headers: getAuthHeader(),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to export");
+      }
+
+      const blob = await response.blob();
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = downloadUrl;
+      
+      const contentDisposition = response.headers.get("Content-Disposition");
+      let filename = `export_${type}_${Date.now()}`;
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename="(.+)"/);
+        if (filenameMatch) {
+          filename = filenameMatch[1];
+        }
+      }
+      
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(downloadUrl);
+      document.body.removeChild(a);
+    } catch (err: any) {
+      setError(err.message || "Failed to export");
+    }
+  };
+
   return (
     <TooltipProvider>
       <div className="min-h-screen bg-background text-foreground">
+        {/* Top navigation bar */}
+        <div className="border-b border-border/50 bg-card/50 backdrop-blur sticky top-0 z-50">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <ShieldCheck className="h-6 w-6 text-primary" />
+              <span className="font-bold text-lg text-foreground">ContractGuard</span>
+            </div>
+            <div className="flex items-center gap-4">
+              <Button variant="ghost" size="sm" onClick={() => navigate("/upload")}>
+                <Upload className="h-4 w-4 mr-2" />
+                New Audit
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => navigate("/history")}>
+                <History className="h-4 w-4 mr-2" />
+                View History
+              </Button>
+              <Button variant="ghost" size="sm" onClick={handleLogout}>
+                Logout
+              </Button>
+            </div>
+          </div>
+        </div>
+
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12 space-y-10">
         {error && (
           <div className="rounded-2xl border border-destructive/20 bg-destructive/10 text-destructive px-4 py-3 text-sm">
@@ -821,6 +864,28 @@ const chartFriendlyLabel = {
                 </option>
               ))}
             </select>
+            {jobId && analysis?.job.status === "completed" && (
+              <>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="gap-2"
+                  onClick={() => handleExport("discrepancies")}
+                >
+                  <Download className="h-4 w-4" />
+                  Export CSV
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="gap-2"
+                  onClick={() => handleExport("report")}
+                >
+                  <FileDown className="h-4 w-4" />
+                  Export Report
+                </Button>
+              </>
+            )}
             <Button variant="secondary" className="gap-2">
               <Calendar className="h-4 w-4" />
               Schedule audit

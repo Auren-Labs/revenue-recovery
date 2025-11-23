@@ -1,6 +1,7 @@
 import { useMemo, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { useDropzone } from "react-dropzone";
+import { getAuthHeader, logout } from "@/utils/auth";
 import {
   UploadCloud,
   FileText,
@@ -13,6 +14,7 @@ import {
   Loader2,
   Lock,
   Download,
+  History,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -113,6 +115,7 @@ const UploadPage = () => {
         contractFiles.forEach((file) => formData.append("files", file));
         const res = await fetch(`${API_BASE}/upload/contracts`, {
           method: "POST",
+          headers: getAuthHeader(),
           body: formData,
         });
         if (!res.ok) {
@@ -129,6 +132,7 @@ const UploadPage = () => {
         billingFiles.forEach((file) => formData.append("files", file));
         const res = await fetch(`${API_BASE}/upload/${jobId}/billing`, {
           method: "POST",
+          headers: getAuthHeader(),
           body: formData,
         });
         if (!res.ok) {
@@ -148,34 +152,51 @@ const UploadPage = () => {
     setCurrentStage("upload");
     setReconProgress(null);
     try {
-      const res = await fetch(`${API_BASE}/upload/${job}/submit`, { method: "POST" });
+      const res = await fetch(`${API_BASE}/upload/${job}/submit`, {
+        method: "POST",
+        headers: {
+          ...getAuthHeader(),
+          "Content-Type": "application/json",
+        },
+      });
       if (!res.ok) {
         const err = await res.json();
         throw new Error(err.detail || "Failed to start audit.");
       }
       const poll = async () => {
-        const statusRes = await fetch(`${API_BASE}/upload/${job}/status`);
+        const statusRes = await fetch(`${API_BASE}/upload/${job}/status`, {
+          headers: getAuthHeader(),
+        });
         if (!statusRes.ok) return;
         const data = await statusRes.json();
         const activeStage =
           (data.stages.find((s: any) => s.status === "in_progress")?.name ??
             data.stages.find((s: any) => s.status === "pending")?.name) as Stage | undefined;
         if (activeStage) setCurrentStage(activeStage);
-        if (data.metrics?.reconciliation_progress) {
+        
+        // Use new progress fields
+        if (data.progress !== undefined || data.progress_message) {
+          setReconProgress({
+            percent: data.progress ? data.progress / 100 : undefined,
+            message: data.progress_message || data.message,
+          });
+        } else if (data.metrics?.reconciliation_progress) {
+          // Fallback to old format
           setReconProgress(data.metrics.reconciliation_progress);
         }
+        
         if (data.status === "completed") {
           setIsUploading(false);
           setCurrentStage(null);
           setMessage("Audit complete. Redirecting to dashboard...");
-          setReconProgress(null);
+          setReconProgress({ percent: 1, message: "Complete!" });
           setTimeout(() => navigate(`/dashboard?job=${job}`), 1500);
         } else if (data.status === "failed") {
           setIsUploading(false);
           setMessage(data.message || "Audit failed. Please retry.");
           setReconProgress(null);
         } else {
-          setTimeout(poll, 2500);
+          setTimeout(poll, 2000); // Poll every 2 seconds
         }
       };
       poll();
@@ -185,8 +206,32 @@ const UploadPage = () => {
     }
   };
 
+  const handleLogout = () => {
+    logout();
+    navigate("/login");
+  };
+
   return (
     <div className="min-h-screen bg-gradient-section">
+      {/* Top navigation bar */}
+      <div className="border-b border-border/50 bg-card/50 backdrop-blur">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="h-6 w-6 text-primary" />
+            <span className="font-bold text-lg text-foreground">ContractGuard</span>
+          </div>
+          <div className="flex items-center gap-4">
+            <Button variant="ghost" size="sm" onClick={() => navigate("/history")}>
+              <History className="h-4 w-4 mr-2" />
+              View History
+            </Button>
+            <Button variant="ghost" size="sm" onClick={handleLogout}>
+              Logout
+            </Button>
+          </div>
+        </div>
+      </div>
+
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-16 space-y-10">
         <header className="space-y-4 text-center">
           <p className="text-sm font-semibold uppercase tracking-[0.3em] text-primary">Upload & Process</p>
@@ -326,59 +371,166 @@ const UploadPage = () => {
 
         {step === 3 && (
           <div className="rounded-3xl border border-border bg-card/85 backdrop-blur p-10 shadow-hero flex flex-col items-center text-center space-y-8">
-            <div className="h-16 w-16 rounded-full bg-primary/10 text-primary flex items-center justify-center border border-primary/30">
-              {isUploading ? <Loader2 className="h-8 w-8 animate-spin" /> : <CheckCircle2 className="h-8 w-8" />}
+            {/* Overall Progress Circle */}
+            <div className="relative">
+              <div className="relative h-32 w-32">
+                <svg className="transform -rotate-90 h-32 w-32" viewBox="0 0 120 120">
+                  {/* Background circle */}
+                  <circle
+                    cx="60"
+                    cy="60"
+                    r="54"
+                    stroke="currentColor"
+                    strokeWidth="8"
+                    fill="none"
+                    className="text-border/30"
+                  />
+                  {/* Progress circle */}
+                  {(() => {
+                    const progress = reconProgress?.percent ?? 0;
+                    const circumference = 2 * Math.PI * 54;
+                    const offset = circumference * (1 - progress);
+                    return (
+                      <circle
+                        cx="60"
+                        cy="60"
+                        r="54"
+                        stroke="url(#progressGradient)"
+                        strokeWidth="8"
+                        fill="none"
+                        strokeLinecap="round"
+                        strokeDasharray={circumference}
+                        strokeDashoffset={offset}
+                        className="transition-all duration-500 ease-out"
+                      />
+                    );
+                  })()}
+                  <defs>
+                    <linearGradient id="progressGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                      <stop offset="0%" stopColor="hsl(var(--primary))" />
+                      <stop offset="100%" stopColor="hsl(var(--primary) / 0.6)" />
+                    </linearGradient>
+                  </defs>
+                </svg>
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <div className="text-center">
+                    <div className="text-3xl font-bold text-foreground">
+                      {Math.round((reconProgress?.percent ?? 0) * 100)}%
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-1">Complete</div>
+                  </div>
+                </div>
+              </div>
+              {isUploading && (
+                <div className="absolute -top-2 -right-2 h-6 w-6 rounded-full bg-primary/20 border-2 border-primary animate-pulse flex items-center justify-center">
+                  <div className="h-2 w-2 rounded-full bg-primary" />
+                </div>
+              )}
             </div>
+
             <div>
               <p className="text-xs uppercase tracking-[0.4em] text-muted-foreground">ContractGuard pipeline</p>
               <h3 className="text-3xl md:text-4xl font-semibold text-foreground mt-2">Audit in progress</h3>
             </div>
+            
+            {/* Progress Message */}
+            {reconProgress?.message && (
+              <div className="px-4 py-2 rounded-lg bg-primary/5 border border-primary/20 text-sm text-foreground/80 max-w-2xl">
+                {reconProgress.message}
+              </div>
+            )}
+
             <p className="text-sm text-muted-foreground max-w-2xl">
-              Analyzing contract rules, aligning them with your billing export, and drafting AI insights. You can close this tab—we’ll email
-              the full Revenue Recovery Report as soon as it’s ready.
+              Analyzing contract rules, aligning them with your billing export, and drafting AI insights. You can close this tab—we'll email
+              the full Revenue Recovery Report as soon as it's ready.
             </p>
-            <div className="w-full max-w-3xl">
-              {(stageOrder as Stage[]).map((stage) => {
+
+            {/* Stage Progress Indicators */}
+            <div className="w-full max-w-3xl space-y-3">
+              {(stageOrder as Stage[]).map((stage, index) => {
                 const Icon = stageLabels[stage].icon;
                 const currentIndex = currentStage ? stageOrder.indexOf(currentStage) : -1;
                 const stageIndex = stageOrder.indexOf(stage);
                 const isActive = currentStage === stage;
                 const isDone = currentIndex !== -1 && stageIndex !== -1 && stageIndex < currentIndex;
-                const statusLabel = isActive ? "In progress" : isDone ? "Complete" : "Queued";
+                const isPending = !isActive && !isDone;
+                
                 return (
-                  <div key={stage} className="flex items-center gap-4 py-3 border-b border-border/60 last:border-none">
-                    <div
-                      className={`h-10 w-10 rounded-xl flex items-center justify-center ${
-                        isActive
-                          ? "bg-primary/10 text-primary border border-primary/40"
-                          : isDone
-                            ? "bg-success/10 text-success border border-success/30"
-                            : "bg-card text-muted-foreground border border-border/60"
-                      }`}
-                    >
-                      <Icon className="h-5 w-5" />
+                  <div
+                    key={stage}
+                    className={`relative flex items-center gap-4 p-4 rounded-xl border transition-all duration-300 ${
+                      isActive
+                        ? "bg-primary/5 border-primary/30 shadow-sm scale-[1.02]"
+                        : isDone
+                          ? "bg-success/5 border-success/20"
+                          : "bg-card/50 border-border/40 opacity-60"
+                    }`}
+                  >
+                    {/* Animated background gradient for active stage */}
+                    {isActive && (
+                      <div className="absolute inset-0 rounded-xl bg-gradient-to-r from-primary/5 via-primary/10 to-primary/5 animate-pulse" />
+                    )}
+                    
+                    {/* Stage Icon */}
+                    <div className="relative z-10">
+                      <div
+                        className={`h-12 w-12 rounded-xl flex items-center justify-center transition-all duration-300 ${
+                          isActive
+                            ? "bg-primary/10 text-primary border-2 border-primary/40 shadow-lg"
+                            : isDone
+                              ? "bg-success/10 text-success border-2 border-success/30"
+                              : "bg-muted text-muted-foreground border-2 border-border/60"
+                        }`}
+                      >
+                        {isActive ? (
+                          <Loader2 className="h-6 w-6 animate-spin" />
+                        ) : isDone ? (
+                          <CheckCircle2 className="h-6 w-6" />
+                        ) : (
+                          <Icon className="h-6 w-6" />
+                        )}
+                      </div>
                     </div>
-                    <div className="flex-1 text-left">
-                      <p className="font-semibold text-foreground">{stageLabels[stage].title}</p>
-                      <p className="text-xs text-muted-foreground">{stageLabels[stage].description}</p>
+
+                    {/* Stage Info */}
+                    <div className="flex-1 text-left relative z-10">
+                      <div className="flex items-center gap-2">
+                        <p className={`font-semibold transition-colors ${
+                          isActive ? "text-primary" : isDone ? "text-success" : "text-foreground/60"
+                        }`}>
+                          {stageLabels[stage].title}
+                        </p>
+                        {isActive && (
+                          <span className="text-xs px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20">
+                            Processing...
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-0.5">{stageLabels[stage].description}</p>
                     </div>
-                    <div className="text-xs font-semibold text-muted-foreground min-w-[140px] text-right">
-                      {stage === "reconciliation" && isActive && reconProgress ? (
-                        <div>
-                          <div className="w-full h-2 bg-secondary/40 rounded-full overflow-hidden">
-                            <div
-                              className="h-full bg-primary transition-all"
-                              style={{
-                                width: `${Math.min(100, Math.max(0, Math.round((reconProgress.percent ?? 0) * 100)))}%`,
-                              }}
-                            />
+
+                    {/* Stage Progress Bar (only for active stage) */}
+                    {isActive && reconProgress && (
+                      <div className="relative z-10 w-32">
+                        <div className="w-full h-1.5 bg-secondary/30 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-gradient-to-r from-primary to-primary/60 rounded-full transition-all duration-500 ease-out relative overflow-hidden"
+                            style={{
+                              width: `${Math.min(100, Math.max(0, Math.round((reconProgress.percent ?? 0) * 100)))}%`,
+                            }}
+                          >
+                            <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent animate-shimmer" />
                           </div>
-                          <p className="text-[11px] text-muted-foreground mt-1">{reconProgress.message}</p>
                         </div>
-                      ) : (
-                        statusLabel
-                      )}
-                    </div>
+                      </div>
+                    )}
+
+                    {/* Completion Checkmark */}
+                    {isDone && (
+                      <div className="relative z-10">
+                        <CheckCircle2 className="h-5 w-5 text-success" />
+                      </div>
+                    )}
                   </div>
                 );
               })}

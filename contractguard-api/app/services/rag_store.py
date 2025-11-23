@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid as uuid_module
 from typing import Any, Dict, List, Tuple
 from uuid import uuid4
 
@@ -198,6 +199,13 @@ def _cosine_similarity(a: List[float], b: List[float]) -> float:
 
 
 def _fetch_rows(table: str, job_id: str) -> List[Dict[str, Any]]:
+    # Validate job_id is a valid UUID to prevent SQL injection
+    try:
+        uuid_module.UUID(job_id)
+    except (ValueError, AttributeError):
+        logger.error(f"Invalid job_id format: {job_id}")
+        return []
+    
     supabase = get_supabase_client()
     if not supabase:
         return []
@@ -210,6 +218,13 @@ def _fetch_rows(table: str, job_id: str) -> List[Dict[str, Any]]:
 
 
 async def query_context(job_id: str, question: str, top_k: int = 4) -> List[Dict[str, Any]]:
+    # Validate job_id is a valid UUID
+    try:
+        uuid_module.UUID(job_id)
+    except (ValueError, AttributeError):
+        logger.error(f"Invalid job_id format in query_context: {job_id}")
+        return []
+    
     if not _is_ready() or not question.strip():
         return []
 

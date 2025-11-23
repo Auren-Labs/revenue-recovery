@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import sys
 import asyncio
 from pathlib import Path
@@ -9,6 +10,8 @@ from typing import List
 from uuid import uuid4
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 # Patch GoTrue's SyncClient BEFORE importing supabase (it imports gotrue lazily).
 _SyncClientCompat = None
@@ -89,4 +92,26 @@ async def upload_files(files: List[tuple[str, bytes]], prefix: str) -> List[str]
         await _upload(path, data)
         stored_paths.append(path)
     return stored_paths
+
+
+async def download_file(storage_path: str) -> bytes | None:
+    """
+    Download a file from Supabase Storage.
+    :param storage_path: Path to file in storage (e.g., "job_id/contracts/filename.pdf")
+    :return: File bytes or None if not found
+    """
+    client = get_client()
+    bucket = settings.supabase_storage_bucket
+    if not client or not bucket:
+        return None
+    
+    try:
+        def _download(p: str) -> bytes:
+            return client.storage.from_(bucket).download(p)
+        
+        file_bytes = await asyncio.to_thread(_download, storage_path)
+        return file_bytes
+    except Exception as e:
+        logger.error(f"Failed to download file from Supabase: {e}")
+        return None
 

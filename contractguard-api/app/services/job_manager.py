@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime
 from fastapi.concurrency import run_in_threadpool
 
 from app.models import Job
 from app.services import document_extraction, llm_extraction, reconciliation, job_repository
+from app.services.email_service import get_email_service
+from app.services.auth import get_auth_service
+
+logger = logging.getLogger(__name__)
 
 try:
     from app.workers.tasks import process_job as celery_task
@@ -66,6 +71,88 @@ def update_stage(job: Job, stage_name: str, status: str, detail: str | None = No
     job_repository.update_stage(job.id, stage_name, status, detail)
 
 
+def _send_completion_email(job: Job) -> None:
+    """Send email notification when audit completes."""
+    try:
+        if not job.customer_id:
+            return
+        
+        email_service = get_email_service()
+        auth_service = get_auth_service()
+        
+        # Get first active user from customer
+        response = auth_service.supabase.table("users").select("email, full_name").eq(
+            "customer_id", job.customer_id
+        ).eq("is_active", True).limit(1).execute()
+        
+        if not response.data:
+            logger.warning(f"No active users found for customer {job.customer_id}")
+            return
+        
+        user_data = response.data[0]
+        user_email = user_data.get("email")
+        user_name = user_data.get("full_name", "User")
+        
+        recoverable_amount = job.metrics.get("recoverable_amount", 0)
+        discrepancy_count = len(job.discrepancies)
+        
+        email_service.send_audit_complete_notification(
+            user_email=user_email,
+            user_name=user_name,
+            vendor_name=job.vendor_name,
+            job_id=job.id,
+            recoverable_amount=recoverable_amount,
+            discrepancy_count=discrepancy_count,
+        )
+    except Exception as e:
+        logger.error(f"Failed to send completion email: {e}")
+
+
+def _send_failure_email(job: Job, error_message: str) -> None:
+    """Send email notification when audit fails."""
+    try:
+        if not job.customer_id:
+            return
+        
+        email_service = get_email_service()
+        auth_service = get_auth_service()
+        
+        # Get first active user from customer
+        response = auth_service.supabase.table("users").select("email, full_name").eq(
+            "customer_id", job.customer_id
+        ).eq("is_active", True).limit(1).execute()
+        
+        if not response.data:
+            logger.warning(f"No active users found for customer {job.customer_id}")
+            return
+        
+        user_data = response.data[0]
+        user_email = user_data.get("email")
+        user_name = user_data.get("full_name", "User")
+        
+        email_service.send_audit_failed_notification(
+            user_email=user_email,
+            user_name=user_name,
+            vendor_name=job.vendor_name,
+            job_id=job.id,
+            error_message=error_message,
+        )
+    except Exception as e:
+        logger.error(f"Failed to send failure email: {e}")
+
+
+def update_progress(job_id: str, progress: int, message: str | None = None) -> None:
+    """Update job progress percentage (0-100) and optional message."""
+    job = get_job(job_id)
+    if not job:
+        return
+    
+    job.metrics["progress"] = max(0, min(100, progress))
+    if message:
+        job.metrics["progress_message"] = message
+    job_repository.save_metrics(job.id, job.metrics)
+
+
 def set_job_status(job: Job, status: str, message: str | None = None) -> None:
     job.status = status
     job.message = message
@@ -94,26 +181,41 @@ def run_pipeline_sync(job_id: str):
         return
     try:
         set_job_status(job, "in_progress")
+        update_progress(job_id, 5, "Starting audit pipeline...")
         update_stage(job, "upload", "completed", "Files stored and ready.")
 
         update_stage(job, "document_extraction", "in_progress")
+        update_progress(job_id, 15, "Extracting contract clauses and terms...")
         extraction = asyncio.run(document_extraction.run(job, job.contracts))
         update_stage(job, "document_extraction", "completed")
+        update_progress(job_id, 40, f"Extracted {extraction.get('clauses', 0)} clauses from {len(extraction.get('documents', []))} documents")
         job_repository.save_metrics(job.id, job.metrics)
 
         update_stage(job, "llm_extraction", "in_progress")
+        update_progress(job_id, 50, "Analyzing contract terms with AI...")
         llm_output = asyncio.run(llm_extraction.analyze(job, extraction["documents"]))
         update_stage(job, "llm_extraction", "completed")
+        update_progress(job_id, 70, "Contract analysis complete")
         job_repository.save_metrics(job.id, job.metrics)
 
         update_stage(job, "reconciliation", "in_progress")
+        update_progress(job_id, 75, "Reconciling billing data with contract terms...")
         asyncio.run(reconciliation.run(job, llm_output))
         update_stage(job, "reconciliation", "completed")
+        update_progress(job_id, 95, "Reconciliation complete, finalizing results...")
         job_repository.save_metrics(job.id, job.metrics)
         job_repository.replace_discrepancies(job.id, job.discrepancies)
 
+        update_progress(job_id, 100, "Audit complete!")
         set_job_status(job, "completed", "Analysis finished.")
+        
+        # Send email notification
+        _send_completion_email(job)
     except Exception as exc:
+        update_progress(job_id, 0, f"Error: {str(exc)}")
         set_job_status(job, "failed", str(exc))
+        
+        # Send failure email notification
+        _send_failure_email(job, str(exc))
 
 

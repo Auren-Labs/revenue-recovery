@@ -36,7 +36,7 @@ def create_job_record(vendor_name: str, organization_id: Optional[str]) -> Job:
         {
             "id": job_id,
             "vendor_name": vendor_name,
-            "organization_id": organization_id,
+            "customer_id": organization_id,  # Use customer_id (matches DB schema)
             "created_at": now,
             "updated_at": now,
         }
@@ -63,7 +63,7 @@ def load_job(job_id: str, organization_id: Optional[str] = None) -> Job | None:
     client = _client()
     query = client.table("jobs").select("*").eq("id", job_id)
     if organization_id:
-        query = query.eq("organization_id", organization_id)
+        query = query.eq("customer_id", organization_id)  # Use customer_id (matches DB schema)
     response = query.limit(1).execute()
     rows = response.data or []
     if not rows:
@@ -99,6 +99,7 @@ def load_job(job_id: str, organization_id: Optional[str] = None) -> Job | None:
         created_at=datetime.fromisoformat(job_row["created_at"].replace("Z", "+00:00")),
         status=job_row.get("status", "queued"),
         message=job_row.get("message"),
+        customer_id=job_row.get("customer_id"),
         metrics=metrics or {},
         stages=[
             {
@@ -231,5 +232,107 @@ def save_metrics(job_id: str, metrics: Dict[str, Any]) -> None:
             "updated_at": datetime.utcnow().isoformat(),
         }
     ).execute()
+
+
+def list_jobs(customer_id: str, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+    """List all jobs for a customer, ordered by most recent first."""
+    client = _client()
+    
+    # Get job summaries (without full details)
+    jobs_response = (
+        client.table("jobs")
+        .select("id, vendor_name, status, message, created_at, updated_at, customer_id")
+        .eq("customer_id", customer_id)
+        .order("created_at", desc=True)
+        .limit(limit)
+        .offset(offset)
+        .execute()
+    )
+    
+    jobs = jobs_response.data or []
+    
+    # Get metrics for each job
+    job_ids = [job["id"] for job in jobs]
+    if not job_ids:
+        return []
+    
+    metrics_response = (
+        client.table("job_metrics")
+        .select("job_id, metrics")
+        .in_("job_id", job_ids)
+        .execute()
+    )
+    
+    metrics_map = {m["job_id"]: m.get("metrics", {}) for m in (metrics_response.data or [])}
+    
+    # Get discrepancy counts
+    discrepancies_response = (
+        client.table("job_discrepancies")
+        .select("job_id")
+        .in_("job_id", job_ids)
+        .execute()
+    )
+    
+    # Count discrepancies per job
+    discrepancy_counts = {}
+    for disc in (discrepancies_response.data or []):
+        job_id = disc["job_id"]
+        discrepancy_counts[job_id] = discrepancy_counts.get(job_id, 0) + 1
+    
+    # Combine data
+    result = []
+    for job in jobs:
+        job_id = job["id"]
+        metrics = metrics_map.get(job_id, {})
+        result.append({
+            "id": job_id,
+            "vendor_name": job["vendor_name"],
+            "status": job.get("status", "queued"),
+            "message": job.get("message"),
+            "created_at": job["created_at"],
+            "updated_at": job.get("updated_at"),
+            "recoverable_amount": metrics.get("recoverable_amount", 0),
+            "total_billed": metrics.get("billing_summary", {}).get("total_billed", 0),
+            "discrepancy_count": discrepancy_counts.get(job_id, 0),
+        })
+    
+    return result
+
+
+def delete_job(job_id: str, customer_id: str) -> bool:
+    """Delete a job and all its related data."""
+    client = _client()
+    
+    # Verify the job belongs to the customer
+    job_response = (
+        client.table("jobs")
+        .select("id, customer_id")
+        .eq("id", job_id)
+        .eq("customer_id", customer_id)
+        .limit(1)
+        .execute()
+    )
+    
+    if not job_response.data:
+        return False
+    
+    # Delete job (cascade will handle related records due to ON DELETE CASCADE)
+    # But we'll also explicitly delete to be safe
+    try:
+        # Delete related records first (due to foreign key constraints)
+        client.table("job_discrepancies").delete().eq("job_id", job_id).execute()
+        client.table("job_metrics").delete().eq("job_id", job_id).execute()
+        client.table("job_stages").delete().eq("job_id", job_id).execute()
+        client.table("job_documents").delete().eq("job_id", job_id).execute()
+        client.table("contract_chunks").delete().eq("job_id", job_id).execute()
+        client.table("billing_chunks").delete().eq("job_id", job_id).execute()
+        
+        # Delete the job itself
+        client.table("jobs").delete().eq("id", job_id).execute()
+        
+        return True
+    except Exception as e:
+        logger.error(f"Failed to delete job {job_id}: {e}")
+        return False
 
 

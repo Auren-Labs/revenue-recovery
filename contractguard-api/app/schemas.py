@@ -22,6 +22,8 @@ class JobStatus(BaseModel):
     message: Optional[str] = None
     stages: List[JobStage]
     metrics: dict = Field(default_factory=dict)
+    progress: Optional[int] = Field(None, ge=0, le=100, description="Progress percentage (0-100)")
+    progress_message: Optional[str] = Field(None, description="Current progress message")
 
 
 class AnalysisSummary(BaseModel):
