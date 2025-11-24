@@ -4,6 +4,7 @@ OpenAI API rate limiting and cost protection using Redis.
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Dict, Optional
 
@@ -25,6 +26,9 @@ MAX_OPENAI_CALLS_PER_DAY_PER_CUSTOMER = 500  # Maximum OpenAI API calls per cust
 
 # Redis client (lazy initialization)
 _redis_client: Optional[redis.Redis] = None
+
+# Module-level in-memory fallback (persists across calls)
+_in_memory_tracker: Dict[str, Dict[str, list]] = defaultdict(lambda: {"calls": []})
 
 
 def _get_redis_client() -> Optional[redis.Redis]:
@@ -81,21 +85,21 @@ def check_openai_rate_limit(customer_id: str, job_id: str) -> tuple[bool, Option
             # Fall through to in-memory fallback
     
     # In-memory fallback (for development or when Redis unavailable)
-    # This is a simple implementation - not recommended for production
-    from collections import defaultdict
-    _openai_call_tracker: Dict[str, Dict[str, list]] = defaultdict(dict)
+    # Use module-level variable (persists across calls)
+    global _in_memory_tracker
     
     today = datetime.utcnow().date().isoformat()
     
     # Check per-job limit
-    job_calls = _openai_call_tracker.get(f"job:{job_id}", {}).get("calls", [])
+    job_key = f"job:{job_id}"
+    job_calls = _in_memory_tracker[job_key]["calls"]
     if len(job_calls) >= MAX_OPENAI_CALLS_PER_JOB:
         return False, f"OpenAI API limit reached for this job ({MAX_OPENAI_CALLS_PER_JOB} calls max)"
     
     # Check per-customer daily limit
     customer_key = f"customer:{customer_id}"
-    customer_data = _openai_call_tracker.get(customer_key, {})
-    today_calls = [call for call in customer_data.get("calls", []) if call.get("date") == today]
+    customer_calls = _in_memory_tracker[customer_key]["calls"]
+    today_calls = [call for call in customer_calls if call.get("date") == today]
     
     if len(today_calls) >= MAX_OPENAI_CALLS_PER_DAY_PER_CUSTOMER:
         return False, f"Daily OpenAI API limit reached ({MAX_OPENAI_CALLS_PER_DAY_PER_CUSTOMER} calls/day)"
@@ -142,8 +146,8 @@ def record_openai_call(customer_id: str, job_id: str, tokens_used: int = 0) -> N
             # Fall through to in-memory fallback
     
     # In-memory fallback
-    from collections import defaultdict
-    _openai_call_tracker: Dict[str, Dict[str, list]] = defaultdict(dict)
+    # Use module-level variable (persists across calls)
+    global _in_memory_tracker
     
     now = datetime.utcnow()
     today = now.date().isoformat()
@@ -156,25 +160,21 @@ def record_openai_call(customer_id: str, job_id: str, tokens_used: int = 0) -> N
     
     # Record per job
     job_key = f"job:{job_id}"
-    if job_key not in _openai_call_tracker:
-        _openai_call_tracker[job_key] = {"calls": []}
-    _openai_call_tracker[job_key]["calls"].append(call_record)
+    _in_memory_tracker[job_key]["calls"].append(call_record)
     
     # Record per customer
     customer_key = f"customer:{customer_id}"
-    if customer_key not in _openai_call_tracker:
-        _openai_call_tracker[customer_key] = {"calls": []}
-    _openai_call_tracker[customer_key]["calls"].append(call_record)
+    _in_memory_tracker[customer_key]["calls"].append(call_record)
     
     # Cleanup old records (older than 7 days)
     cutoff_date = (now - timedelta(days=7)).date().isoformat()
-    for key in list(_openai_call_tracker.keys()):
-        _openai_call_tracker[key]["calls"] = [
-            call for call in _openai_call_tracker[key]["calls"]
+    for key in list(_in_memory_tracker.keys()):
+        _in_memory_tracker[key]["calls"] = [
+            call for call in _in_memory_tracker[key]["calls"]
             if call.get("date", "") >= cutoff_date
         ]
-        if not _openai_call_tracker[key]["calls"]:
-            del _openai_call_tracker[key]
+        if not _in_memory_tracker[key]["calls"]:
+            del _in_memory_tracker[key]
 
 
 def get_openai_usage(customer_id: str, job_id: Optional[str] = None) -> Dict:
@@ -205,18 +205,19 @@ def get_openai_usage(customer_id: str, job_id: Optional[str] = None) -> Dict:
             # Fall through to in-memory fallback
     
     # In-memory fallback
-    from collections import defaultdict
-    _openai_call_tracker: Dict[str, Dict[str, list]] = defaultdict(dict)
+    # Use module-level variable (persists across calls)
+    global _in_memory_tracker
     
     today = datetime.utcnow().date().isoformat()
     
     if job_id:
-        job_calls = _openai_call_tracker.get(f"job:{job_id}", {}).get("calls", [])
+        job_key = f"job:{job_id}"
+        job_calls = _in_memory_tracker[job_key]["calls"]
         result["job_calls"] = len(job_calls)
         result["job_tokens"] = sum(call.get("tokens", 0) for call in job_calls)
     
     customer_key = f"customer:{customer_id}"
-    customer_calls = _openai_call_tracker.get(customer_key, {}).get("calls", [])
+    customer_calls = _in_memory_tracker[customer_key]["calls"]
     today_calls = [call for call in customer_calls if call.get("date") == today]
     result["today_calls"] = len(today_calls)
     result["today_tokens"] = sum(call.get("tokens", 0) for call in today_calls)

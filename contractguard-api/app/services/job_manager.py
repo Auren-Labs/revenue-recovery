@@ -9,6 +9,7 @@ from app.models import Job
 from app.services import document_extraction, llm_extraction, reconciliation, job_repository
 from app.services.email_service import get_email_service
 from app.services.auth import get_auth_service
+from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,9 @@ def _send_completion_email(job: Job) -> None:
         recoverable_amount = job.metrics.get("recoverable_amount", 0)
         discrepancy_count = len(job.discrepancies)
         
+        settings = get_settings()
+        dashboard_url = f"{settings.frontend_url}/dashboard?job={job.id}"
+        
         email_service.send_audit_complete_notification(
             user_email=user_email,
             user_name=user_name,
@@ -117,6 +121,7 @@ def _send_completion_email(job: Job) -> None:
             job_id=job.id,
             recoverable_amount=recoverable_amount,
             discrepancy_count=discrepancy_count,
+            dashboard_url=dashboard_url,
         )
     except Exception as e:
         logger.error(f"Failed to send completion email: {e}")
@@ -144,12 +149,16 @@ def _send_failure_email(job: Job, error_message: str) -> None:
         user_email = user_data.get("email")
         user_name = user_data.get("full_name", "User")
         
+        settings = get_settings()
+        dashboard_url = f"{settings.frontend_url}/dashboard?job={job.id}"
+        
         email_service.send_audit_failed_notification(
             user_email=user_email,
             user_name=user_name,
             vendor_name=job.vendor_name,
             job_id=job.id,
             error_message=error_message,
+            dashboard_url=dashboard_url,
         )
     except Exception as e:
         logger.error(f"Failed to send failure email: {e}")

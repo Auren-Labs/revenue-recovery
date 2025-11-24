@@ -32,8 +32,12 @@ class Settings(BaseSettings):
 
     supabase_jwt_secret: Optional[str] = None
 
+    # Redis configuration (for rate limiting + Celery)
     redis_broker_url: str = "redis://localhost:6379/0"
     redis_result_backend: str = "redis://localhost:6379/1"
+    redis_host: str = "localhost"
+    redis_port: int = 6379
+    redis_password: str = ""
 
     # Email/SMTP settings
     smtp_host: Optional[str] = None
@@ -42,6 +46,9 @@ class Settings(BaseSettings):
     smtp_password: Optional[str] = None
     smtp_from: Optional[str] = None
     smtp_to: Optional[str] = None  # Default recipient if user email not available
+
+    # Frontend URL for email links
+    frontend_url: str = "http://localhost:5173"
 
     class Config:
         env_file = ".env"
