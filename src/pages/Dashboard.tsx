@@ -26,6 +26,8 @@ import {
   Copy,
   ChevronDown,
   ChevronUp,
+  FileEdit,
+  FileText as FileTextIcon,
 } from "lucide-react";
 import { getAuthHeader, logout } from "@/utils/auth";
 import { ChartStyle, ChartConfig } from "@/components/ui/chart";
@@ -60,6 +62,7 @@ import { PerformanceMetrics } from "@/components/PerformanceMetrics";
 import { EmptyState } from "@/components/EmptyState";
 import { DashboardSkeleton } from "@/components/LoadingSkeleton";
 import { CustomerDrillDown } from "@/components/CustomerDrillDown";
+import { PricingTimeline } from "@/components/PricingTimeline";
 import { HelpCircle, Upload, FileSearch, CheckCircle2, History as HistoryIcon, Download, FileDown, Settings } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
 
@@ -142,6 +145,38 @@ type JobMetrics = Record<string, unknown> & {
   recoverable_amount?: number;
   documents?: ExtractedDocument[];
   billing_files?: BillingFile[];
+  gpt4o_rules?: {
+    base_amount?: number;
+    escalation_rate?: number;
+    effective_start_date?: string;
+    currency?: string;
+    amendment_history?: Array<{
+      date?: string;
+      amount?: number;
+      source?: string;
+      description?: string;
+    }>;
+    pricing_timeline?: Array<{
+      start_date: string;
+      end_date?: string;
+      amount: number;
+      source: string;
+      reason: string;
+      invoice_count?: number;
+      discrepancy_count?: number;
+      total_leakage?: number;
+      invoice_breakdown?: Array<{
+        month: string;
+        invoice_date: string;
+        expected: number;
+        billed: number;
+        difference: number;
+        has_discrepancy: boolean;
+        invoice_number?: string;
+        description?: string;
+      }>;
+    }>;
+  };
 };
 
 type AnalysisSummary = {
@@ -1502,6 +1537,272 @@ const chartFriendlyLabel = {
             </div>
           </div>
         </section>
+
+        {/* 🔥 NEW: Pricing Timeline Visualization */}
+        {metrics.gpt4o_rules?.pricing_timeline && metrics.gpt4o_rules.pricing_timeline.length > 0 ? (
+          <section className="grid gap-6">
+            <PricingTimeline
+              periods={metrics.gpt4o_rules.pricing_timeline}
+              discrepancies={discrepancies}
+              currency={contractCurrency}
+              invoiceCount={billingSummary.invoice_count || 0}
+              onViewContract={(source) => {
+                // Find document by source filename or use first available document
+                let doc: ExtractedDocument | undefined;
+                
+                if (source === "MSA" || source === "amendment") {
+                  // For generic sources, use the first contract document
+                  doc = documents.find((d) => d.filename && (d.filename.endsWith(".pdf") || d.filename.endsWith(".PDF"))) || documents[0];
+                } else {
+                  // Try to find exact match first
+                  doc = documents.find((d) => d.filename === source);
+                  
+                  // If not found, try partial match
+                  if (!doc) {
+                    doc = documents.find((d) => d.filename?.includes(source) || source.includes(d.filename || ""));
+                  }
+                  
+                  // Fallback to first document
+                  if (!doc && documents.length > 0) {
+                    doc = documents[0];
+                  }
+                }
+                
+                if (doc) {
+                  // Try to find a clause with regions first
+                  const clauseWithRegion = doc.clauses?.find((c) => c.regions && c.regions.length > 0);
+                  
+                  if (clauseWithRegion && clauseWithRegion.regions?.[0]) {
+                    const region = clauseWithRegion.regions[0];
+                    const evidence: DiscrepancyEvidence = {
+                      type: "contract_clause",
+                      label: clauseWithRegion.label || "Contract",
+                      text: clauseWithRegion.text || "",
+                      page: region.page,
+                      bounds: region.bounds,
+                      regions: clauseWithRegion.regions,
+                      file: doc.filename,
+                    };
+                    setViewerClause({ doc, evidence });
+                  } else if (doc.clauses && doc.clauses.length > 0) {
+                    // Use first clause even without regions
+                    const firstClause = doc.clauses[0];
+                    const evidence: DiscrepancyEvidence = {
+                      type: "contract_clause",
+                      label: firstClause.label || "Contract",
+                      text: firstClause.text || "",
+                      page: 1,
+                      bounds: { x: 0, y: 0, width: 100, height: 100 },
+                      regions: [],
+                      file: doc.filename,
+                    };
+                    setViewerClause({ doc, evidence });
+                  } else {
+                    // No clauses, just open the document on page 1
+                    const evidence: DiscrepancyEvidence = {
+                      type: "contract_clause",
+                      label: "Contract Document",
+                      text: "",
+                      page: 1,
+                      bounds: { x: 0, y: 0, width: 100, height: 100 },
+                      regions: [],
+                      file: doc.filename,
+                    };
+                    setViewerClause({ doc, evidence });
+                  }
+                } else {
+                  // No documents available
+                  toast({
+                    title: "Document not found",
+                    description: `Unable to find document: ${source}`,
+                    variant: "destructive",
+                  });
+                }
+              }}
+              onViewDiscrepancies={(period) => {
+                // Scroll to discrepancies section
+                discrepanciesSectionRef.current?.scrollIntoView({ behavior: "smooth" });
+              }}
+              onViewInvoice={(invoiceNumber, invoiceDate) => {
+                // Find the discrepancy for this invoice
+                const disc = discrepancies.find((d) => 
+                  (d as any).invoice_reference === invoiceNumber || 
+                  (d.invoice_date === invoiceDate && (d as any).invoice_reference === invoiceNumber)
+                );
+                
+                if (disc) {
+                  // Scroll to the discrepancy in the list
+                  discrepanciesSectionRef.current?.scrollIntoView({ behavior: "smooth" });
+                  // Could also highlight the specific discrepancy
+                  toast({
+                    title: "Invoice Details",
+                    description: `Viewing invoice ${invoiceNumber} from ${new Date(invoiceDate).toLocaleDateString()}`,
+                  });
+                } else {
+                  toast({
+                    title: "Invoice not found",
+                    description: `Unable to locate invoice ${invoiceNumber}`,
+                    variant: "destructive",
+                  });
+                }
+              }}
+            />
+          </section>
+        ) : (
+          // Show placeholder or build timeline from available data
+          jobId && metrics.gpt4o_rules && (
+            <section className="grid gap-6">
+              <div className="rounded-3xl border border-border bg-card/90 shadow-hover p-6">
+                <h3 className="text-xl font-semibold text-foreground mb-2">Contract Pricing Timeline</h3>
+                <p className="text-sm text-muted-foreground mb-4">
+                  Building timeline from available contract data...
+                </p>
+                {/* Build timeline from available rules if pricing_timeline is missing */}
+                {(() => {
+                  const rules = metrics.gpt4o_rules;
+                  if (!rules) return null;
+                  
+                  const periods: Array<{
+                    start_date: string;
+                    amount: number;
+                    source: string;
+                    reason: string;
+                  }> = [];
+                  
+                  // Add base period
+                  if (rules.base_amount) {
+                    const baseDate = rules.effective_start_date || "2024-01-01";
+                    periods.push({
+                      start_date: baseDate,
+                      amount: rules.base_amount,
+                      source: "MSA",
+                      reason: "Original base pricing"
+                    });
+                    
+                    // Add escalation period if exists
+                    if (rules.escalation_rate && rules.escalation_rate > 0 && rules.effective_start_date) {
+                      const escalatedAmount = rules.base_amount * (1 + rules.escalation_rate);
+                      periods.push({
+                        start_date: rules.effective_start_date,
+                        amount: escalatedAmount,
+                        source: "MSA",
+                        reason: `${(rules.escalation_rate * 100).toFixed(1)}% annual escalation`
+                      });
+                    }
+                    
+                    // Add amendments if available
+                    if (rules.amendment_history && Array.isArray(rules.amendment_history)) {
+                      rules.amendment_history.forEach((amendment: any) => {
+                        if (amendment.date && amendment.amount) {
+                          periods.push({
+                            start_date: amendment.date,
+                            amount: amendment.amount,
+                            source: amendment.source || "amendment",
+                            reason: amendment.description || "Price amendment"
+                          });
+                        }
+                      });
+                    }
+                  }
+                  
+                  if (periods.length > 0) {
+                    return (
+                      <PricingTimeline
+                        periods={periods}
+                        discrepancies={discrepancies}
+                        currency={contractCurrency}
+                        invoiceCount={billingSummary.invoice_count || 0}
+                        onViewContract={(source) => {
+                          // Find document by source filename or use first available document
+                          let doc: ExtractedDocument | undefined;
+                          
+                          if (source === "MSA" || source === "amendment") {
+                            // For generic sources, use the first contract document
+                            doc = documents.find((d) => d.filename && (d.filename.endsWith(".pdf") || d.filename.endsWith(".PDF"))) || documents[0];
+                          } else {
+                            // Try to find exact match first
+                            doc = documents.find((d) => d.filename === source);
+                            
+                            // If not found, try partial match
+                            if (!doc) {
+                              doc = documents.find((d) => d.filename?.includes(source) || source.includes(d.filename || ""));
+                            }
+                            
+                            // Fallback to first document
+                            if (!doc && documents.length > 0) {
+                              doc = documents[0];
+                            }
+                          }
+                          
+                          if (doc) {
+                            // Try to find a clause with regions first
+                            const clauseWithRegion = doc.clauses?.find((c) => c.regions && c.regions.length > 0);
+                            
+                            if (clauseWithRegion && clauseWithRegion.regions?.[0]) {
+                              const region = clauseWithRegion.regions[0];
+                              const evidence: DiscrepancyEvidence = {
+                                type: "contract_clause",
+                                label: clauseWithRegion.label || "Contract",
+                                text: clauseWithRegion.text || "",
+                                page: region.page,
+                                bounds: region.bounds,
+                                regions: clauseWithRegion.regions,
+                                file: doc.filename,
+                              };
+                              setViewerClause({ doc, evidence });
+                            } else if (doc.clauses && doc.clauses.length > 0) {
+                              // Use first clause even without regions
+                              const firstClause = doc.clauses[0];
+                              const evidence: DiscrepancyEvidence = {
+                                type: "contract_clause",
+                                label: firstClause.label || "Contract",
+                                text: firstClause.text || "",
+                                page: 1,
+                                bounds: { x: 0, y: 0, width: 100, height: 100 },
+                                regions: [],
+                                file: doc.filename,
+                              };
+                              setViewerClause({ doc, evidence });
+                            } else {
+                              // No clauses, just open the document on page 1
+                              const evidence: DiscrepancyEvidence = {
+                                type: "contract_clause",
+                                label: "Contract Document",
+                                text: "",
+                                page: 1,
+                                bounds: { x: 0, y: 0, width: 100, height: 100 },
+                                regions: [],
+                                file: doc.filename,
+                              };
+                              setViewerClause({ doc, evidence });
+                            }
+                          } else {
+                            // No documents available
+                            toast({
+                              title: "Document not found",
+                              description: `Unable to find document: ${source}`,
+                              variant: "destructive",
+                            });
+                          }
+                        }}
+                        onViewDiscrepancies={(period) => {
+                          discrepanciesSectionRef.current?.scrollIntoView({ behavior: "smooth" });
+                        }}
+                      />
+                    );
+                  }
+                  
+                  return (
+                    <div className="text-sm text-muted-foreground">
+                      <p>Pricing timeline data not available. This will appear after running a new audit with contract and billing files.</p>
+                      <p className="text-xs mt-2">Available data: {JSON.stringify(Object.keys(rules))}</p>
+                    </div>
+                  );
+                })()}
+              </div>
+            </section>
+          )
+        )}
 
         <section ref={evidenceSectionRef} className="grid gap-6 lg:grid-cols-2">
         <div className="rounded-3xl border border-border bg-card/90 shadow-hover p-6 space-y-4">

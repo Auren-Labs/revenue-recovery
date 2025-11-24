@@ -1175,7 +1175,12 @@ async def run(job, llm_insights: Dict) -> Dict:
     
     # 🔥 Step 2.5: Build unified pricing timeline
     logger.info("[2.5/6] Building unified pricing timeline...")
+    # Ensure rules_dict has all necessary fields for timeline building
+    if "base_start_date" not in rules_dict and rules.base_amount:
+        # Use effective_start_date as fallback, or default to 1 year ago
+        rules_dict["base_start_date"] = rules.effective_start_date.isoformat() if rules.effective_start_date else "2024-01-01"
     pricing_timeline = build_pricing_timeline(rules_dict)
+    logger.info(f"📅 Built pricing timeline with {len(pricing_timeline.periods) if pricing_timeline else 0} periods")
     
     # Step 3: Parse and classify invoice items
     logger.info("[3/6] Classifying invoice line items...")
@@ -1219,12 +1224,90 @@ async def run(job, llm_insights: Dict) -> Dict:
     job.metrics["recoverable_amount"] = round(total_recoverable, 2)
     job.metrics["currency"] = rules.currency
     job.metrics["gpt4o_enhanced"] = True
-    job.metrics["gpt4o_rules"] = {  # 🔥 ADD THIS: Store rules for frontend
+    # Store pricing timeline data for frontend visualization with invoice breakdown
+    pricing_periods = []
+    if pricing_timeline:
+        logger.info(f"📅 Pricing timeline has {len(pricing_timeline.periods) if pricing_timeline.periods else 0} periods")
+        if pricing_timeline.periods:
+            for idx, period in enumerate(pricing_timeline.periods):
+                period_start = period.start_date
+                period_end = pricing_timeline.periods[idx + 1].start_date if idx < len(pricing_timeline.periods) - 1 else date.today()
+                
+                # Find invoices in this period
+                period_invoices = [
+                    item for item in invoice_items
+                    if item.invoice_date and period_start <= item.invoice_date < period_end
+                ]
+                
+                # Find discrepancies for invoices in this period
+                period_discrepancies = [
+                    d for d in discrepancies
+                    if any(
+                        item.invoice_date and period_start <= item.invoice_date < period_end
+                        for item in d.invoice_items
+                    )
+                ]
+                
+                # Build month-by-month invoice breakdown
+                invoice_breakdown = []
+                for item in period_invoices:
+                    if not item.invoice_date:
+                        continue
+                    
+                    expected_amount, _ = pricing_timeline.get_expected_amount(item.invoice_date)
+                    billed_amount = item.rate if item.rate > 0 else item.amount
+                    difference = expected_amount - billed_amount
+                    has_discrepancy = abs(difference) > 2.0  # Tolerance of ₹2
+                    
+                    month_key = item.invoice_date.strftime("%b %Y")
+                    
+                    invoice_breakdown.append({
+                        "month": month_key,
+                        "invoice_date": item.invoice_date.isoformat(),
+                        "expected": round(expected_amount, 2),
+                        "billed": round(billed_amount, 2),
+                        "difference": round(difference, 2),
+                        "has_discrepancy": has_discrepancy,
+                        "invoice_number": item.invoice_number or "N/A",
+                        "description": item.description[:50] if item.description else "",
+                    })
+                
+                # Sort by date
+                invoice_breakdown.sort(key=lambda x: x["invoice_date"])
+                
+                # Calculate total leakage for this period
+                total_leakage = sum(
+                    inv["difference"] for inv in invoice_breakdown
+                    if inv["has_discrepancy"] and inv["difference"] > 0
+                )
+                
+                pricing_periods.append({
+                    "start_date": period.start_date.isoformat(),
+                    "end_date": period_end.isoformat() if idx < len(pricing_timeline.periods) - 1 else None,
+                    "amount": period.amount,
+                    "source": period.source,
+                    "reason": period.reason,
+                    "invoice_count": len(period_invoices),
+                    "discrepancy_count": len(period_discrepancies),
+                    "total_leakage": round(total_leakage, 2),
+                    "invoice_breakdown": invoice_breakdown,  # 🔥 NEW: Month-by-month breakdown
+                })
+            logger.info(f"✅ Added {len(pricing_periods)} pricing periods with invoice breakdown to metrics")
+        else:
+            logger.warning("⚠️  Pricing timeline exists but has no periods!")
+    else:
+        logger.warning("⚠️  Pricing timeline is None!")
+    
+    # Always include pricing_timeline, even if empty
+    job.metrics["gpt4o_rules"] = {  # 🔥 Store rules for frontend
         "base_amount": rules.base_amount,
         "escalation_rate": rules.escalation_rate,
         "effective_start_date": rules.effective_start_date.isoformat(),
-        "currency": rules.currency
+        "currency": rules.currency,
+        "amendment_history": rules.amendment_history or [],
+        "pricing_timeline": pricing_periods,  # 🔥 NEW: Full pricing timeline (always included)
     }
+    logger.info(f"📊 Stored gpt4o_rules with pricing_timeline: {len(pricing_periods)} periods")
     job.metrics["audit_time_seconds"] = audit_time
     job.metrics["classification_stats"] = {
         "total_items": len(invoice_items),
