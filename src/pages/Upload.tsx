@@ -16,6 +16,7 @@ import {
   Download,
   History,
   Settings,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -70,7 +71,10 @@ const UploadPage = () => {
   }, []);
 
   const onDropBilling = useCallback((acceptedFiles: File[]) => {
-    setBillingFiles(acceptedFiles.filter((file) => file.name.endsWith(".csv") || file.name.endsWith(".xls") || file.name.endsWith(".xlsx")));
+    const validFiles = acceptedFiles.filter((file) => 
+      file.name.endsWith(".csv") || file.name.endsWith(".xls") || file.name.endsWith(".xlsx")
+    );
+    setBillingFiles((prev) => [...prev, ...validFiles]);
   }, []);
 
   const contractDropzone = useDropzone({
@@ -86,7 +90,7 @@ const UploadPage = () => {
 
   const billingDropzone = useDropzone({
     onDrop: onDropBilling,
-    multiple: false,
+    multiple: true,
     accept: {
       "text/csv": [".csv"],
       "application/vnd.ms-excel": [".xls", ".xlsx"],
@@ -329,8 +333,8 @@ const UploadPage = () => {
                 </div>
                 <h3 className="text-2xl font-semibold text-foreground">2/2: Upload Billing Records</h3>
                 <p className="text-sm text-muted-foreground max-w-lg">
-                  Upload a CSV (preferred) or XLSX export of invoices or billing line items for this vendor from Stripe, NetSuite, QuickBooks,
-                  or your billing system. We map every line item back to the contract rules.
+                  Upload one or more CSV or XLSX exports of invoices or billing line items for this vendor from Stripe, NetSuite, QuickBooks,
+                  or your billing system. You can upload multiple files—we'll combine them automatically. We map every line item back to the contract rules.
                 </p>
                 <Button variant="ghost" size="sm" className="gap-2 text-primary">
                   <Download className="h-4 w-4" />
@@ -338,12 +342,24 @@ const UploadPage = () => {
                 </Button>
                 {billingFiles.length > 0 && (
                   <div className="w-full text-left space-y-2">
-                    <p className="text-sm text-muted-foreground">Billing data</p>
+                    <p className="text-sm text-muted-foreground">Billing data ({billingFiles.length} {billingFiles.length === 1 ? "file" : "files"})</p>
                     <ul className="space-y-2 max-h-48 overflow-y-auto">
-                      {billingFiles.map((file) => (
-                        <li key={file.name} className="flex items-center justify-between text-sm text-foreground">
-                          <span>{file.name}</span>
-                          <span className="text-muted-foreground">{(file.size / (1024 * 1024)).toFixed(2)} MB</span>
+                      {billingFiles.map((file, index) => (
+                        <li key={`${file.name}-${index}`} className="flex items-center justify-between text-sm text-foreground group">
+                          <span className="flex-1 truncate">{file.name}</span>
+                          <div className="flex items-center gap-2">
+                            <span className="text-muted-foreground">{(file.size / (1024 * 1024)).toFixed(2)} MB</span>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setBillingFiles((prev) => prev.filter((_, i) => i !== index));
+                              }}
+                              className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-destructive/10 rounded text-destructive"
+                              aria-label="Remove file"
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          </div>
                         </li>
                       ))}
                     </ul>

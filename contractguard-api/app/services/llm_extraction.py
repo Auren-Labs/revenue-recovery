@@ -121,8 +121,18 @@ def _build_insights(clause_counts: Counter, documents: List[Dict[str, Any]]) -> 
 def _extract_rules_from_gpt4o_terms(documents: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Extract audit rules from GPT-4o contract terms.
-    This is the MAGIC that eliminates manual configuration!
+    CRITICAL: Amendments MUST override base contracts!
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info("="*80)
+    logger.info("🔍 _extract_rules_from_gpt4o_terms CALLED")
+    logger.info(f"📄 Processing {len(documents)} documents")
+    for idx, doc in enumerate(documents):
+        logger.info(f"   Document {idx+1}: {doc.get('filename')}")
+    logger.info("="*80)
+    
     rules = {
         "base_amount": None,
         "escalation_rate": None,
@@ -132,45 +142,124 @@ def _extract_rules_from_gpt4o_terms(documents: List[Dict[str, Any]]) -> Dict[str
         "exclusion_keywords": [],
         "sla_uptime": None,
         "service_credit_rate": None,
+        "amendment_history": []
     }
     
+    # 🔥 STEP 1: Classify documents by type
+    msa_docs = []
+    amendment_docs = []
+    addendum_docs = []
+    
     for doc in documents:
-        gpt4o_terms = doc.get("gpt4o_contract_terms", {})
+        filename = doc.get("filename", "").lower()
+        title = doc.get("fields", {}).get("Title", {}).get("value", "").lower()
         
+        if "amendment" in filename or "amendment" in title:
+            amendment_docs.append(doc)
+        elif "addendum" in filename or "sla" in filename or "addendum" in title:
+            addendum_docs.append(doc)
+        else:
+            msa_docs.append(doc)
+    
+    logger.info(f"📊 Classification Results:")
+    logger.info(f"   MSAs: {len(msa_docs)} - {[d.get('filename') for d in msa_docs]}")
+    logger.info(f"   Amendments: {len(amendment_docs)} - {[d.get('filename') for d in amendment_docs]}")
+    logger.info(f"   Addendums: {len(addendum_docs)} - {[d.get('filename') for d in addendum_docs]}")
+    
+    # 🔥 STEP 2: Extract base terms from MSA
+    for doc in msa_docs:
+        gpt4o_terms = doc.get("gpt4o_contract_terms", {})
         if not gpt4o_terms:
             continue
         
-        # Extract base pricing
         base_pricing = gpt4o_terms.get("base_pricing", {})
-        if base_pricing.get("amount") and not rules["base_amount"]:
-            rules["base_amount"] = base_pricing["amount"]
+        if base_pricing.get("amount"):
+            rules["amendment_history"].append({
+                "date": base_pricing.get("start_date", "1900-01-01"),
+                "amount": base_pricing["amount"],
+                "source": doc.get("filename"),
+                "description": "Original base pricing"
+            })
+            
+            if not rules["base_amount"]:
+                rules["base_amount"] = base_pricing["amount"]
+        
         if base_pricing.get("currency"):
             rules["currency"] = base_pricing["currency"]
         
-        # Extract escalation terms
         escalation = gpt4o_terms.get("escalation", {})
-        if escalation.get("rate") and not rules["escalation_rate"]:
+        if escalation.get("rate"):
             rules["escalation_rate"] = escalation["rate"]
-        if escalation.get("effective_date") and not rules["effective_start_date"]:
+        if escalation.get("effective_date"):
             rules["effective_start_date"] = escalation["effective_date"]
         
-        # Extract invoice identifiers
         invoice_ids = gpt4o_terms.get("invoice_identifiers", {})
         if invoice_ids.get("description_keywords"):
             rules["invoice_keywords"].extend(invoice_ids["description_keywords"])
         if invoice_ids.get("one_time_patterns"):
             rules["exclusion_keywords"].extend(invoice_ids["one_time_patterns"])
-        
-        # Extract SLA terms
-        special_clauses = gpt4o_terms.get("special_clauses", {})
-        if special_clauses.get("sla_uptime"):
-            rules["sla_uptime"] = special_clauses["sla_uptime"]
-        if special_clauses.get("service_credit_rate"):
-            rules["service_credit_rate"] = special_clauses["service_credit_rate"]
     
-    # Deduplicate keywords
+    # 🔥 STEP 3: Apply amendments (THESE OVERRIDE!)
+    for doc in sorted(amendment_docs, key=lambda x: x.get("fields", {}).get("EffectiveDate", {}).get("value", "1900-01-01")):
+        gpt4o_terms = doc.get("gpt4o_contract_terms", {})
+        if not gpt4o_terms:
+            logger.warning(f"⚠️  No gpt4o_contract_terms in {doc.get('filename')}")
+            continue
+        
+        base_pricing = gpt4o_terms.get("base_pricing", {})
+        
+        logger.info(f"🔄 Processing amendment: {doc.get('filename')}")
+        logger.info(f"   base_pricing found: {bool(base_pricing)}")
+        if base_pricing:
+            logger.info(f"   amount: {base_pricing.get('amount')}")
+            logger.info(f"   start_date: {base_pricing.get('start_date')}")
+        
+        if base_pricing.get("amount"):
+            old_base = rules["base_amount"]
+            rules["base_amount"] = base_pricing["amount"]
+            logger.info(f"   ✅ OVERRIDING base_amount: {old_base} → {rules['base_amount']}")
+            
+            rules["amendment_history"].append({
+                "date": base_pricing.get("start_date", "1900-01-01"),
+                "amount": base_pricing["amount"],
+                "source": doc.get("filename"),
+                "description": base_pricing.get("description", "Price amendment")
+            })
+            
+            if base_pricing.get("start_date"):
+                old_date = rules["effective_start_date"]
+                rules["effective_start_date"] = base_pricing["start_date"]
+                logger.info(f"   ✅ UPDATING effective_start_date: {old_date} → {rules['effective_start_date']}")
+        
+        escalation = gpt4o_terms.get("escalation", {})
+        if escalation.get("rate"):
+            rules["escalation_rate"] = escalation["rate"]
+    
+    # 🔥 STEP 4: Add SLA terms from addendums
+    for doc in addendum_docs:
+        gpt4o_terms = doc.get("gpt4o_contract_terms", {})
+        if not gpt4o_terms:
+            continue
+        
+        special = gpt4o_terms.get("special_clauses", {})
+        if special.get("sla_uptime"):
+            rules["sla_uptime"] = special["sla_uptime"]
+        if special.get("service_credit_rate"):
+            rules["service_credit_rate"] = special["service_credit_rate"]
+    
     rules["invoice_keywords"] = list(set(rules["invoice_keywords"]))
     rules["exclusion_keywords"] = list(set(rules["exclusion_keywords"]))
+    rules["amendment_history"].sort(key=lambda x: x["date"])
+    
+    logger.info("="*80)
+    logger.info("✅ FINAL RULES EXTRACTED:")
+    logger.info(f"   base_amount: {rules['base_amount']}")
+    logger.info(f"   escalation_rate: {rules['escalation_rate']}")
+    logger.info(f"   effective_start_date: {rules['effective_start_date']}")
+    logger.info(f"   amendment_history: {len(rules['amendment_history'])} entries")
+    for idx, amendment in enumerate(rules["amendment_history"]):
+        logger.info(f"      {idx+1}. {amendment['date']}: ₹{amendment.get('amount', 0):,.0f} ({amendment['description']})")
+    logger.info("="*80)
     
     return rules
 

@@ -55,9 +55,34 @@ def get_client() -> Client | None:
     return _supabase_client
 
 
+async def _upload_single_file(client: Client, bucket: str, filename: str, data: bytes, prefix: str) -> str:
+    """Upload a single file to Supabase Storage."""
+    path = f"{prefix}/{uuid4()}-{filename}"
+    await asyncio.to_thread(
+        client.storage.from_(bucket).upload,
+        path,
+        data,
+        {"contentType": "application/octet-stream"},
+    )
+    return path
+
+async def _store_local_fallback(files: List[tuple[str, bytes]], prefix: str) -> List[str]:
+    """Store files locally when Supabase is not available."""
+    local_dir = Path(tempfile.gettempdir()) / "contractguard_supabase"
+    local_dir.mkdir(parents=True, exist_ok=True)
+    stored_paths = []
+    for filename, data in files:
+        safe_prefix = prefix.replace("/", "_")
+        target = local_dir / f"{safe_prefix}-{uuid4()}-{filename}"
+        if not target.parent.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        stored_paths.append(str(target))
+    return stored_paths
+
 async def upload_files(files: List[tuple[str, bytes]], prefix: str) -> List[str]:
     """
-    Uploads files to Supabase Storage.
+    Uploads files to Supabase Storage in parallel.
     :param files: list of tuples (filename, bytes)
     :param prefix: folder path within the bucket
     :return: list of public paths
@@ -65,33 +90,15 @@ async def upload_files(files: List[tuple[str, bytes]], prefix: str) -> List[str]
     client = get_client()
     bucket = settings.supabase_storage_bucket
     if not client or not bucket:
-        local_dir = Path(tempfile.gettempdir()) / "contractguard_supabase"
-        local_dir.mkdir(parents=True, exist_ok=True)
-        stored_paths = []
-        for filename, data in files:
-            safe_prefix = prefix.replace("/", "_")
-            target = local_dir / f"{safe_prefix}-{uuid4()}-{filename}"
-            if not target.parent.exists():
-                target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-            stored_paths.append(str(target))
-        return stored_paths
+        return await _store_local_fallback(files, prefix)
 
-    stored_paths = []
-    for filename, data in files:
-        path = f"{prefix}/{uuid4()}-{filename}"
-
-        async def _upload(p: str, payload: bytes) -> None:
-            await asyncio.to_thread(
-                client.storage.from_(bucket).upload,
-                p,
-                payload,
-                {"contentType": "application/octet-stream"},
-            )
-
-        await _upload(path, data)
-        stored_paths.append(path)
-    return stored_paths
+    # Upload all files in parallel
+    upload_tasks = [
+        _upload_single_file(client, bucket, filename, data, prefix)
+        for filename, data in files
+    ]
+    stored_paths = await asyncio.gather(*upload_tasks)
+    return list(stored_paths)
 
 
 async def download_file(storage_path: str) -> bytes | None:

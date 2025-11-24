@@ -317,6 +317,7 @@ const Dashboard = () => {
   const [viewerDimensions, setViewerDimensions] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
   const [pdfScale, setPdfScale] = useState(1.0);
   const [autoScale, setAutoScale] = useState(1.0);
+  const [pdfBlobUrl, setPdfBlobUrl] = useState<string | null>(null);
   const viewerContainerRef = useRef<HTMLDivElement | null>(null);
   
   // Reset scale when viewer opens with new document
@@ -398,6 +399,67 @@ const Dashboard = () => {
     viewerClause && jobId && viewerClause.doc.filename
       ? `${API_BASE}/jobs/${jobId}/contracts/${encodeURIComponent(viewerClause.doc.filename)}`
       : undefined;
+
+  // Fetch PDF as blob with auth headers when viewer opens
+  useEffect(() => {
+    if (!viewerUrl) {
+      // Clean up blob URL when viewer closes
+      setPdfBlobUrl((prev) => {
+        if (prev) {
+          URL.revokeObjectURL(prev);
+        }
+        return null;
+      });
+      return;
+    }
+
+    let currentBlobUrl: string | null = null;
+    let cancelled = false;
+
+    // Fetch PDF with auth headers
+    fetch(viewerUrl, {
+      headers: getAuthHeader(),
+    })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`Failed to fetch PDF: ${response.statusText}`);
+        }
+        return response.blob();
+      })
+      .then((blob) => {
+        if (!cancelled) {
+          const blobUrl = URL.createObjectURL(blob);
+          currentBlobUrl = blobUrl;
+          setPdfBlobUrl(blobUrl);
+        } else {
+          URL.revokeObjectURL(URL.createObjectURL(blob));
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.error("Error loading PDF:", error);
+          toast({
+            title: "Failed to load PDF",
+            description: error.message || "Could not load the contract file.",
+            variant: "destructive",
+          });
+        }
+      });
+
+    // Cleanup function - revoke blob URL when component unmounts or viewerUrl changes
+    return () => {
+      cancelled = true;
+      if (currentBlobUrl) {
+        URL.revokeObjectURL(currentBlobUrl);
+      }
+      setPdfBlobUrl((prev) => {
+        if (prev && prev !== currentBlobUrl) {
+          URL.revokeObjectURL(prev);
+        }
+        return null;
+      });
+    };
+  }, [viewerUrl, toast]);
   const viewerHighlight =
     viewerClause?.evidence.bounds ||
     viewerClause?.evidence.regions?.find((region) => region.bounds)?.bounds ||
@@ -2040,7 +2102,7 @@ const chartFriendlyLabel = {
               )}
             </SheetTitle>
           </SheetHeader>
-          {viewerClause && viewerUrl ? (
+          {viewerClause && (viewerUrl || pdfBlobUrl) ? (
             <div className="flex-1 flex flex-col min-h-0">
               <div className="px-6 py-3 border-b border-border/60 text-sm text-muted-foreground flex flex-wrap items-center justify-between gap-3">
                 <span>Highlighting page {viewerPage}. Use the controls to zoom the PDF.</span>
@@ -2080,7 +2142,8 @@ const chartFriendlyLabel = {
               <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden bg-secondary/30 py-4" ref={viewerContainerRef}>
                 <div className="flex justify-center">
                   <div className="relative">
-                    <PdfDocument file={viewerUrl} loading={<p>Loading contract…</p>}>
+                    {pdfBlobUrl ? (
+                      <PdfDocument file={pdfBlobUrl} loading={<p>Loading contract…</p>}>
                       <PdfPage
                         key={`${viewerPage}-${pdfScale}`}
                         pageNumber={viewerPage ?? 1}
@@ -2103,7 +2166,13 @@ const chartFriendlyLabel = {
                           }
                         }}
                       />
-                    </PdfDocument>
+                      </PdfDocument>
+                    ) : (
+                      <div className="p-8 text-center text-muted-foreground">
+                        <Loader2 className="h-8 w-8 animate-spin mx-auto mb-2" />
+                        <p>Loading PDF...</p>
+                      </div>
+                    )}
                     {viewerHighlight && viewerDimensions.width > 0 && viewerDimensions.height > 0 && (
                       <div
                         className="absolute border-2 border-cta bg-cta/30 rounded-md pointer-events-none transition-all shadow-lg"

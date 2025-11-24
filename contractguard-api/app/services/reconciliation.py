@@ -16,6 +16,7 @@ from statistics import mean
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
+from app.services.pricing_timeline import build_pricing_timeline
 
 try:
     import openpyxl  # type: ignore
@@ -81,6 +82,12 @@ class ContractRules:
     exclusion_keywords: List[str]
     sla_uptime: Optional[float] = None
     service_credit_rate: Optional[float] = None
+    amendment_history: List[Dict[str, Any]] = None  # 🔥 NEW
+    
+    def __post_init__(self):
+        """Initialize amendment_history if not provided."""
+        if self.amendment_history is None:
+            self.amendment_history = []
     
     def expected_amount_after_escalation(self) -> float:
         """Calculate expected amount after escalation."""
@@ -777,37 +784,94 @@ async def _parse_invoice_items(
 # ============================================================================
 # INTELLIGENT ESCALATION AUDIT
 # ============================================================================
-
+def _get_expected_amount_for_date(
+    invoice_date: date,
+    rules: ContractRules,
+    amendment_history: List[Dict[str, Any]]
+) -> Tuple[float, str]:
+    """
+    Calculate expected amount based on invoice date.
+    Returns: (expected_amount, reason)
+    
+    This handles:
+    - Original base pricing
+    - Annual escalations
+    - Mid-contract amendments
+    """
+    # 🔥 Sort amendments by date
+    sorted_amendments = sorted(
+        amendment_history,
+        key=lambda x: x.get("date") or "1900-01-01"
+    )
+    
+    # Find the applicable amendment for this invoice date
+    applicable_amendment = None
+    for amendment in sorted_amendments:
+        amendment_date_str = amendment.get("date")
+        if not amendment_date_str:
+            continue
+        
+        try:
+            amendment_date = datetime.fromisoformat(amendment_date_str).date()
+            if invoice_date >= amendment_date:
+                applicable_amendment = amendment
+            else:
+                break  # Amendments are sorted, so stop here
+        except (ValueError, AttributeError):
+            continue
+    
+    if applicable_amendment:
+        # Use amendment amount
+        expected = float(applicable_amendment["amount"])
+        source = applicable_amendment.get("source", "amendment")
+        reason = f"Using amended rate from {source}"
+        return (expected, reason)
+    
+    # No amendment applies - use base + escalation
+    base = rules.base_amount
+    escalation_date = rules.effective_start_date
+    
+    if invoice_date >= escalation_date and rules.escalation_rate > 0:
+        expected = base * (1 + rules.escalation_rate)
+        reason = f"Using escalated rate (base + {rules.escalation_rate*100}%)"
+        return (expected, reason)
+    
+    # Use original base
+    reason = "Using original base rate"
+    return (base, reason)
 
 async def _audit_escalation_clause(
     invoice_items: List[InvoiceLineItem],
     rules: ContractRules,
     documents: List[Dict[str, Any]],
-    classifier: IntelligentClassifier
-) -> List[Discrepancy]:  # 🔥 Changed: Returns List instead of Optional
+    classifier: IntelligentClassifier,
+    pricing_timeline  # 🔥 Add this parameter
+) -> List[Discrepancy]:
     """
-    Audit for missing price escalations.
-    Returns one discrepancy per affected invoice for granular tracking.
+    Audit for pricing discrepancies using the unified timeline.
+    SIMPLE: Just compare invoice amount vs timeline amount.
     """
-    # Filter to recurring charges after escalation date
+    # Filter to recurring charges with dates
     affected_items = [
         item for item in invoice_items
-        if item.is_likely_recurring() and item.is_after_date(rules.effective_start_date)
+        if item.is_likely_recurring() and item.invoice_date
     ]
     
     if not affected_items:
-        logger.info("No recurring charges after escalation date")
-        return []  # 🔥 Changed: Return empty list
+        logger.info("No recurring charges with dates to audit")
+        return []
     
-    logger.info(f"Auditing {len(affected_items)} recurring charges after {rules.effective_start_date}")
+    logger.info(f"Auditing {len(affected_items)} recurring charges")
     
-    expected_rate = rules.expected_amount_after_escalation()
     tolerance = 2.0  # $2 tolerance for rounding
-    
-    # Find items with discrepancies
     potential_errors = []
     
     for item in affected_items:
+        # 🔥 THE MAGIC: One simple call to get expected amount
+        expected_rate, reason = pricing_timeline.get_expected_amount(item.invoice_date)
+        
+        logger.debug(f"Invoice {item.invoice_date}: billed={item.rate:,.0f}, expected={expected_rate:,.0f} ({reason})")
+        
         if item.rate < (expected_rate - tolerance):
             # Calculate difference
             difference = expected_rate - item.rate
@@ -818,46 +882,46 @@ async def _audit_escalation_clause(
             pro_rata_keywords = ["pro-rata", "pro rata", "prorata", "partial", "days"]
             has_pro_rata_keyword = any(kw in desc_lower for kw in pro_rata_keywords)
             
-            # Check if amount suggests partial month (within 5% of 25%, 50%, 75%)
+            # Check if amount suggests partial month
             partial_percentages = [0.25, 0.33, 0.50, 0.66, 0.75]
             actual_percentage = item.rate / expected_rate
             is_likely_partial = any(abs(actual_percentage - pp) < 0.05 for pp in partial_percentages)
             
             if has_pro_rata_keyword or is_likely_partial:
-                logger.info(f"Pro-rata detected and approved: {item.description[:50]} - {item.rate} ({actual_percentage*100:.1f}% of expected)")
-                continue  # Skip this item - it's legitimate pro-rata
+                logger.info(f"Pro-rata detected: {item.description[:50]} - {item.rate:,.0f} ({actual_percentage*100:.1f}% of expected)")
+                continue
             
             # Skip GPT-4o validation for OBVIOUS missing escalations
             if abs(percentage_diff - (rules.escalation_rate * 100)) < 1.0:
-                logger.warning(f"OBVIOUS escalation missing: {item.description[:40]} - {item.rate} (expected {expected_rate})")
-                potential_errors.append((item, 0.99, "Missing escalation (exact percentage match)", "dispute"))
+                logger.warning(f"OBVIOUS escalation missing: {item.description[:40]}")
+                potential_errors.append((item, expected_rate, 0.99, reason, "dispute"))
                 continue
             
             # For other cases, validate with GPT-4o
-            is_valid, validation_confidence, reason, action = await classifier.validate_discrepancy(
+            is_valid, validation_confidence, validation_reason, action = await classifier.validate_discrepancy(
                 item,
                 expected_rate,
-                f"Base: {rules.base_amount}, Escalation: {rules.escalation_rate*100}%, Effective: {rules.effective_start_date}"
+                f"Expected: ₹{expected_rate:,.0f} ({reason})"
             )
             
             if is_valid and validation_confidence > 0.7:
-                potential_errors.append((item, validation_confidence, reason, action))
-                logger.warning(f"Escalation missing (validated): {item.description[:40]} - {item.rate} (expected {expected_rate})")
+                potential_errors.append((item, expected_rate, validation_confidence, reason, action))
+                logger.warning(f"Discrepancy validated: {item.description[:40]}")
             else:
-                logger.info(f"False positive filtered: {reason}")
+                logger.info(f"False positive filtered: {validation_reason}")
     
     if not potential_errors:
-        logger.info("✓ No escalation issues detected")
-        return []  # 🔥 Changed: Return empty list
+        logger.info("✓ No pricing discrepancies detected")
+        return []
     
-    # 🔥 CRITICAL CHANGE: Create ONE discrepancy PER invoice
+    # Create ONE discrepancy PER invoice
     discrepancies = []
     contract_evidence = _get_clause_references(documents, "cpi_uplift", limit=2)
     
-    for item, confidence, reason, action in potential_errors:
+    for item, expected_rate, confidence, reason, action in potential_errors:
         leakage_amount = expected_rate - item.rate
         
-        # Determine priority for this specific invoice
+        # Determine priority
         if leakage_amount > rules.base_amount * 0.1 and confidence > 0.85:
             priority = Priority.CRITICAL
         elif confidence > 0.8:
@@ -869,24 +933,23 @@ async def _audit_escalation_clause(
             type=DiscrepancyType.MISSING_ESCALATION,
             priority=priority,
             title=f"Price escalation not applied ({rules.escalation_rate*100}%)",
-            description=f"Invoice dated {item.invoice_date} shows rate of {item.rate:,.2f} instead of expected {expected_rate:,.2f} after {rules.escalation_rate*100}% escalation.",
+            description=f"Invoice dated {item.invoice_date} shows rate of {item.rate:,.2f} instead of expected {expected_rate:,.2f}. {reason}",
             financial_impact=leakage_amount,
-            invoice_items=[item],  # 🔥 Only THIS invoice
+            invoice_items=[item],
             contract_evidence=contract_evidence,
             confidence=confidence,
             recommendations=[
-                f"Review invoice {item.invoice_number or 'for ' + item.invoice_date.strftime('%B %Y') if item.invoice_date else ''}",
-                f"Expected rate after escalation: {expected_rate:,.2f} {rules.currency}",
-                f"Escalation effective from: {rules.effective_start_date}",
+                f"Review invoice {item.invoice_number or ''}",
+                f"Expected rate: {expected_rate:,.2f} {rules.currency}",
+                f"Reason: {reason}",
                 f"Action: {action}"
             ]
         )
-        # 🔥 ADD THIS DEBUG:
-        logger.info(f"Created discrepancy: date={item.invoice_date}, amount={leakage_amount}, desc={item.description[:40]}")
+        
         discrepancies.append(discrepancy)
     
-    logger.info(f"✓ Created {len(discrepancies)} individual discrepancy records")
-    return discrepancies  # 🔥 Return list of discrepancies
+    logger.info(f"✓ Created {len(discrepancies)} discrepancy records")
+    return discrepancies
 
 
 # ============================================================================
@@ -1009,9 +1072,10 @@ def _extract_contract_rules(llm_insights: Dict[str, Any]) -> ContractRules:
     exclusion_keywords = rules_data.get("exclusion_keywords", [])
     sla_uptime = rules_data.get("sla_uptime")
     service_credit_rate = rules_data.get("service_credit_rate")
+    amendment_history = rules_data.get("amendment_history", [])  # 🔥 NEW
     
     if not effective_date:
-        effective_date = date(2025, 1, 1)  # Default
+        effective_date = date(2025, 1, 1)
     
     rules = ContractRules(
         base_amount=base_amount,
@@ -1021,7 +1085,8 @@ def _extract_contract_rules(llm_insights: Dict[str, Any]) -> ContractRules:
         invoice_keywords=invoice_keywords,
         exclusion_keywords=exclusion_keywords,
         sla_uptime=sla_uptime,
-        service_credit_rate=service_credit_rate
+        service_credit_rate=service_credit_rate,
+        amendment_history=amendment_history  # 🔥 NEW
     )
     
     # Validate
@@ -1029,7 +1094,13 @@ def _extract_contract_rules(llm_insights: Dict[str, Any]) -> ContractRules:
     if not is_valid:
         logger.warning(f"Contract rules validation issues: {', '.join(issues)}")
     else:
-        logger.info(f"✓ Contract rules validated: base={base_amount}, escalation={escalation_rate*100}%, effective={effective_date}")
+        # 🔥 Log amendment history
+        if amendment_history:
+            logger.info(f"✓ Amendment history: {len(amendment_history)} price changes tracked")
+            for amendment in amendment_history:
+                logger.info(f"  - {amendment.get('date')}: ₹{amendment.get('amount'):,.0f} ({amendment.get('description')})")
+        
+        logger.info(f"✓ Final rules: base={base_amount}, escalation={escalation_rate*100}%, effective={effective_date}")
     
     return rules
 
@@ -1093,28 +1164,39 @@ async def run(job, llm_insights: Dict) -> Dict:
     _classifier = IntelligentClassifier(customer_id=customer_id, job_id=job.id)
     
     # Step 1: Load billing data
-    logger.info("[1/5] Loading billing data...")
+    logger.info("[1/6] Loading billing data...")
     billing_rows = _load_billing_rows(job)
     billing_summary = _summarize_billing(billing_rows)
     
     # Step 2: Extract and validate contract rules
-    logger.info("[2/5] Extracting contract rules...")
+    logger.info("[2/6] Extracting contract rules...")
+    rules_dict = llm_insights.get("rules", {})
     rules = _extract_contract_rules(llm_insights)
     
+    # 🔥 Step 2.5: Build unified pricing timeline
+    logger.info("[2.5/6] Building unified pricing timeline...")
+    pricing_timeline = build_pricing_timeline(rules_dict)
+    
     # Step 3: Parse and classify invoice items
-    logger.info("[3/5] Classifying invoice line items...")
+    logger.info("[3/6] Classifying invoice line items...")
     invoice_items = await _parse_invoice_items(billing_rows, rules.invoice_keywords, _classifier)
     
     # Step 4: Run intelligent audits
-    logger.info("[4/5] Running intelligent audits...")
+    logger.info("[4/6] Running intelligent audits...")
     
     documents = job.metrics.get("documents") if isinstance(job.metrics.get("documents"), list) else None
     
     discrepancies = []
     
-    # Audit 1: Price escalation (now returns List[Discrepancy])
-    escalation_discrepancies = await _audit_escalation_clause(invoice_items, rules, documents, _classifier)
-    discrepancies.extend(escalation_discrepancies)  # 🔥 Use extend instead of append
+    # Audit 1: Price escalation using unified timeline
+    escalation_discrepancies = await _audit_escalation_clause(
+        invoice_items, 
+        rules, 
+        documents, 
+        _classifier,
+        pricing_timeline  # 🔥 Pass the timeline
+    )
+    discrepancies.extend(escalation_discrepancies)
     
     # Audit 2: SLA credits (only if evidence of issues)
     sla_discrepancy = await _audit_sla_credits(

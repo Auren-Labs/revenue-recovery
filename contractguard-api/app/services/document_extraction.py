@@ -649,11 +649,17 @@ async def run(job, documents: List[Dict]) -> Dict:
     if not client:
         logger.warning("Azure Document Intelligence credentials missing; falling back to GPT-4o-only extraction.")
         
-        # 🔥 Fallback: Pure GPT-4o extraction
-        for doc in documents:
+        # 🔥 Fallback: Pure GPT-4o extraction - process in parallel
+        async def _process_single_document_fallback(doc: dict) -> dict:
+            """Process a single document with GPT-4o fallback."""
             local_path = Path(doc.get("local_path", ""))
             if not local_path.exists():
-                continue
+                return {
+                    "filename": doc.get("filename"),
+                    "error": "File not found",
+                    "clauses": [],
+                    "totals": {"clause_hits": 0}
+                }
             
             try:
                 # Read document as text if possible
@@ -676,21 +682,25 @@ async def run(job, documents: List[Dict]) -> Dict:
                     doc.get("filename", "")
                 )
                 
-                extracted_docs.append({
+                return {
                     "filename": doc.get("filename"),
                     "gpt4o_contract_terms": contract_terms,
                     "clauses": [],
                     "totals": {"clause_hits": 0},
                     "extraction_method": "gpt4o_only"
-                })
+                }
             except Exception as e:
                 logger.error(f"GPT-4o extraction failed for {doc.get('filename')}: {e}")
-                extracted_docs.append({
+                return {
                     "filename": doc.get("filename"),
                     "error": str(e),
                     "clauses": [],
                     "totals": {"clause_hits": 0}
-                })
+                }
+        
+        # Process all documents in parallel
+        processing_tasks = [_process_single_document_fallback(doc) for doc in documents]
+        extracted_docs = list(await asyncio.gather(*processing_tasks))
         
         total_clauses = 0
         job.metrics["documents"] = extracted_docs
@@ -699,21 +709,26 @@ async def run(job, documents: List[Dict]) -> Dict:
         await rag_store.index_contracts(job, extracted_docs)
         return {"clauses": total_clauses, "documents": extracted_docs}
 
-    # Standard Azure + GPT-4o pipeline
+    # Standard Azure + GPT-4o pipeline - process documents in parallel
+    async def _process_single_document(document_meta: dict) -> dict:
+        """Process a single document and return its summary."""
+        try:
+            summary = await _analyze_document(client, document_meta, gpt4o_enhancer)
+            return summary
+        except (AzureError, OSError) as exc:
+            logger.exception("Document extraction failed for %s: %s", document_meta.get("filename"), exc)
+            return {
+                "filename": document_meta.get("filename"),
+                "error": str(exc),
+                "clauses": [],
+                "fields": {},
+                "totals": {"clause_hits": 0},
+            }
+    
     async with client:
-        for document_meta in documents:
-            try:
-                summary = await _analyze_document(client, document_meta, gpt4o_enhancer)
-                extracted_docs.append(summary)
-            except (AzureError, OSError) as exc:
-                logger.exception("Document extraction failed for %s: %s", document_meta.get("filename"), exc)
-                extracted_docs.append({
-                    "filename": document_meta.get("filename"),
-                    "error": str(exc),
-                    "clauses": [],
-                    "fields": {},
-                    "totals": {"clause_hits": 0},
-                })
+        # Process all documents in parallel
+        processing_tasks = [_process_single_document(doc) for doc in documents]
+        extracted_docs = list(await asyncio.gather(*processing_tasks))
 
     total_clauses = sum(doc.get("totals", {}).get("clause_hits", 0) for doc in extracted_docs)
     job.metrics["documents"] = extracted_docs
