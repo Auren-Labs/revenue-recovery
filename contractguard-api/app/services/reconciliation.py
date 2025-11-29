@@ -10,6 +10,12 @@ PRECISION IMPROVEMENTS:
 5. No "obvious" bypass - always validate
 6. Confidence explainer for every discrepancy
 7. "Hold for Review" category for medium-confidence findings
+
+BUG FIXES (v2):
+8. Separate RECURRING_FIXED vs RECURRING_VARIABLE classification
+9. Duplicate charge detection
+10. Overage rate/quantity validation
+11. Proper monthly aggregation excluding overages
 """
 
 from __future__ import annotations
@@ -18,12 +24,14 @@ import csv
 import json
 import logging
 import asyncio
+import re
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from statistics import mean
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
+from collections import defaultdict
 from app.services.pricing_timeline import build_pricing_timeline
 
 # Import precision utilities
@@ -87,6 +95,8 @@ class DiscrepancyType(Enum):
     MISSING_SLA_CREDITS = "missing_sla_credits"
     UNEXPECTED_CHARGE = "unexpected_charge"
     DUPLICATE_CHARGE = "duplicate_charge"
+    OVERAGE_RATE_MISMATCH = "overage_rate_mismatch"
+    OVERAGE_QUANTITY_MISMATCH = "overage_quantity_mismatch"
 
 
 class Priority(Enum):
@@ -99,8 +109,10 @@ class Priority(Enum):
 
 
 class InvoiceClassification(Enum):
-    """Invoice line item classifications."""
-    RECURRING = "recurring"
+    """Invoice line item classifications - NOW WITH FIXED VS VARIABLE DISTINCTION."""
+    RECURRING_FIXED = "recurring_fixed"      # Base fee, add-ons (fixed monthly)
+    RECURRING_VARIABLE = "recurring_variable" # Overages (variable monthly)
+    RECURRING = "recurring"                   # Legacy - for backward compatibility
     ONE_TIME = "one_time"
     CREDIT = "credit"
     ADJUSTMENT = "adjustment"
@@ -123,9 +135,15 @@ class ContractRules:
     sla_uptime: Optional[float] = None
     service_credit_rate: Optional[float] = None
     amendment_history: List[Dict[str, Any]] = None
-    extraction_confidence: float = 1.0  # NEW: Track extraction confidence
-    needs_review: bool = False  # NEW: Flag if manual review needed
-    validation_warnings: List[str] = field(default_factory=list)  # NEW: Validation warnings
+    extraction_confidence: float = 1.0
+    needs_review: bool = False
+    validation_warnings: List[str] = field(default_factory=list)
+    
+    # NEW: Overage rates from contract
+    storage_overage_rate: Optional[float] = None
+    storage_overage_unit: str = "TB"
+    compute_overage_rate: Optional[float] = None
+    compute_overage_unit: str = "vCPU"
     
     def __post_init__(self):
         """Initialize amendment_history if not provided."""
@@ -166,19 +184,44 @@ class InvoiceLineItem:
     confidence: float
     raw_row: Dict[str, Any]
     
-    # NEW: Additional precision metadata
+    # Precision metadata
     date_parsing_confidence: float = 1.0
     date_was_ambiguous: bool = False
     classification_reason: str = ""
+    
+    # NEW: Additional fields for overage validation
+    sku: str = ""
+    quantity: float = 0.0
+    unit_rate: float = 0.0
+    parsed_quantity_from_desc: Optional[float] = None
+    parsed_unit_from_desc: Optional[str] = None
     
     def is_after_date(self, cutoff_date: date) -> bool:
         """Check if invoice is after a date."""
         return self.invoice_date and self.invoice_date >= cutoff_date
     
     def is_likely_recurring(self) -> bool:
-        """Check if this is likely a recurring charge."""
+        """Check if this is likely a recurring charge (fixed OR variable)."""
         return (
-            self.classification == InvoiceClassification.RECURRING and
+            self.classification in (
+                InvoiceClassification.RECURRING,
+                InvoiceClassification.RECURRING_FIXED,
+                InvoiceClassification.RECURRING_VARIABLE
+            ) and
+            self.confidence > 0.7
+        )
+    
+    def is_fixed_recurring(self) -> bool:
+        """Check if this is a FIXED recurring charge (base fee, add-ons)."""
+        return (
+            self.classification == InvoiceClassification.RECURRING_FIXED and
+            self.confidence > 0.7
+        )
+    
+    def is_variable_recurring(self) -> bool:
+        """Check if this is a VARIABLE recurring charge (overages)."""
+        return (
+            self.classification == InvoiceClassification.RECURRING_VARIABLE and
             self.confidence > 0.7
         )
     
@@ -206,15 +249,13 @@ class Discrepancy:
     confidence: float
     recommendations: List[str]
     
-    # NEW: Precision enhancements
+    # Precision enhancements
     confidence_breakdown: Optional[ConfidenceBreakdown] = None
     finding_status: FindingStatus = FindingStatus.NEEDS_REVIEW
     validation_reason: str = ""
     
     def effective_confidence(self) -> float:
-        """
-        Calculate effective confidence from all signals.
-        """
+        """Calculate effective confidence from all signals."""
         if self.confidence_breakdown:
             return self.confidence_breakdown.overall()
         return self.confidence
@@ -252,8 +293,8 @@ class Discrepancy:
             "due": due_date,
             "invoice_date": primary_invoice_date,
             "invoice_reference": primary_invoice_number,
-            "finding_status": self.finding_status.value,  # NEW
-            "validation_reason": self.validation_reason,  # NEW
+            "finding_status": self.finding_status.value,
+            "validation_reason": self.validation_reason,
             "evidence": self.contract_evidence + [
                 {
                     "type": "invoice_line_error",
@@ -263,7 +304,8 @@ class Discrepancy:
                     "found_rate": item.rate,
                     "classification": item.classification.value,
                     "confidence": round(item.effective_confidence(), 3),
-                    "date_was_ambiguous": item.date_was_ambiguous,  # NEW
+                    "date_was_ambiguous": item.date_was_ambiguous,
+                    "sku": item.sku,  # NEW
                 }
                 for item in self.invoice_items[:5]
             ],
@@ -281,12 +323,85 @@ class Discrepancy:
 # FIELD EXTRACTORS
 # ============================================================================
 
-_AMOUNT_FIELDS = ["amount", "Amount", "value", "Value", "total", "Total", "charge", "Charge", "billed", "Billed"]
+_AMOUNT_FIELDS = [
+    "total_line_amount", "line_amount", "amount", "Amount",
+    "value", "Value", "total", "Total", "charge", "Charge",
+    "billed", "Billed", "subtotal", "Subtotal"
+]
 _CUSTOMER_FIELDS = ["Customer", "customer", "Account", "account", "Client", "client", "Company", "company", "Name"]
 _INVOICE_DATE_FIELDS = ["Invoice_Date", "invoice_date", "Date", "date", "InvoiceDate"]
 _INVOICE_FIELDS = ["InvoiceNumber", "invoiceNumber", "Invoice", "invoice", "Number", "number", "Id", "ID", "Invoice_No"]
-_DESC_FIELDS = ["Item_Desc", "item_desc", "Description", "description", "Memo", "memo", "Activity"]
-_RATE_FIELDS = ["Rate", "rate", "Unit Price", "unit_price", "Price"]
+_DESC_FIELDS = ["line_description", "Item_Desc", "item_desc", "Description", "description", "Memo", "memo", "Activity"]
+_RATE_FIELDS = ["unit_price", "Rate", "rate", "Unit Price", "unit_price", "Price", "unitprice"]
+_SKU_FIELDS = ["sku", "SKU", "product_code", "ProductCode", "item_code", "ItemCode"]
+_QTY_FIELDS = ["quantity", "Quantity", "qty", "Qty", "units", "Units"]
+
+def deduplicate_billing_rows(rows: list, invoice_fields: list = None) -> list:
+    """
+    Deduplicate billing rows by invoice number.
+    
+    When multiple billing files contain the same invoice, keep only one copy.
+    Priority: Keep the row from the more "authoritative" file (not scenario files).
+    
+    Args:
+        rows: List of billing row dictionaries
+        invoice_fields: List of possible column names for invoice number
+    
+    Returns:
+        Deduplicated list of rows
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    if invoice_fields is None:
+        invoice_fields = [
+            "Invoice_No", "invoice_no", "InvoiceNumber", "invoiceNumber",
+            "Invoice", "invoice", "Number", "Id", "ID"
+        ]
+    
+    # Track invoices we've seen
+    seen_invoices = {}
+    duplicates_removed = 0
+    
+    # Sort rows to prioritize non-scenario files
+    def file_priority(row):
+        source = str(row.get("__source_file", "")).lower()
+        if "scenario" in source:
+            return 1  # Lower priority
+        return 0  # Higher priority
+    
+    sorted_rows = sorted(rows, key=file_priority)
+    
+    for row in sorted_rows:
+        # Find invoice number
+        invoice_no = None
+        for field in invoice_fields:
+            if field in row and row[field]:
+                invoice_no = str(row[field]).strip()
+                break
+        
+        if not invoice_no:
+            # No invoice number - keep but can't deduplicate
+            if invoice_no not in seen_invoices:
+                seen_invoices[f"__no_inv_{len(seen_invoices)}"] = row
+            continue
+        
+        # Normalize invoice number (remove suffixes like -CR, -OV, -DUP for base matching)
+        # But keep full invoice_no for unique identification
+        if invoice_no in seen_invoices:
+            duplicates_removed += 1
+            source = row.get("__source_file", "unknown")
+            existing_source = seen_invoices[invoice_no].get("__source_file", "unknown")
+            logger.debug(f"Duplicate {invoice_no}: keeping from {existing_source}, skipping from {source}")
+        else:
+            seen_invoices[invoice_no] = row
+    
+    result = list(seen_invoices.values())
+    
+    if duplicates_removed > 0:
+        logger.info(f"📊 Deduplicated billing: {len(rows)} → {len(result)} rows ({duplicates_removed} duplicates removed)")
+    
+    return result
 
 
 def _to_float(value: Any) -> float:
@@ -310,17 +425,35 @@ def _extract_field(row: Dict, choices: List[str]) -> Any:
     return None
 
 
+def _parse_quantity_from_description(description: str) -> Tuple[Optional[float], Optional[str]]:
+    """
+    Extract quantity and unit from description.
+    E.g., "Storage overage (4 TB)" -> (4.0, "TB")
+    """
+    patterns = [
+        r'\((\d+(?:\.\d+)?)\s*(TB|GB|vCPU|vCPUs|users?|seats?)\)',  # (4 TB)
+        r'(\d+(?:\.\d+)?)\s*(TB|GB|vCPU|vCPUs|users?|seats?)',       # 4 TB
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, description, re.IGNORECASE)
+        if match:
+            quantity = float(match.group(1))
+            unit = match.group(2).upper().rstrip('S')  # Normalize: vCPUs -> VCPU
+            return (quantity, unit)
+    
+    return (None, None)
+
+
 # ============================================================================
-# GPT-4O INTELLIGENT CLASSIFIER
+# GPT-4O INTELLIGENT CLASSIFIER (ENHANCED)
 # ============================================================================
 
 class IntelligentClassifier:
     """Production-grade GPT-4o classifier with tenant-isolated caching."""
     
     def __init__(self, customer_id: str, job_id: str):
-        """
-        Initialize classifier with tenant isolation.
-        """
+        """Initialize classifier with tenant isolation."""
         self.customer_id = customer_id
         self.job_id = job_id
         self.client = None
@@ -343,16 +476,34 @@ class IntelligentClassifier:
         self.cache.clear()
         logger.debug("Cache cleared")
     
-    def _deterministic_classification(self, description: str, amount: float) -> Tuple[InvoiceClassification, float, str]:
+    def _deterministic_classification(self, description: str, amount: float, sku: str = "") -> Tuple[InvoiceClassification, float, str]:
         """
-        Fast, deterministic classification for obvious cases.
+        Fast, deterministic classification with FIXED vs VARIABLE distinction.
         Returns: (classification, confidence, reasoning)
         """
         desc_lower = description.lower()
+        sku_lower = sku.lower() if sku else ""
         
         # CREDITS (negative amounts)
         if amount < 0:
             return (InvoiceClassification.CREDIT, 0.99, "Negative amount indicates credit/refund")
+        
+        # ============================================
+        # 🔥 NEW: OVERAGE KEYWORDS (VARIABLE recurring)
+        # ============================================
+        overage_keywords = [
+            "overage", "over-", "additional", "excess", "extra",
+            "per tb", "per vcpu", "per user", "per seat", "usage",
+            "consumption", "metered", "variable"
+        ]
+        if any(kw in desc_lower for kw in overage_keywords):
+            matched = [kw for kw in overage_keywords if kw in desc_lower][0]
+            return (InvoiceClassification.RECURRING_VARIABLE, 0.95, f"Overage keyword: '{matched}'")
+        
+        # SKU-based overage detection
+        overage_skus = ["ovr", "usage", "metered", "variable", "excess"]
+        if any(kw in sku_lower for kw in overage_skus):
+            return (InvoiceClassification.RECURRING_VARIABLE, 0.90, f"Overage SKU pattern: '{sku}'")
         
         # OBVIOUS ONE-TIME
         onetime_keywords = [
@@ -364,21 +515,27 @@ class IntelligentClassifier:
             matched = [kw for kw in onetime_keywords if kw in desc_lower][0]
             return (InvoiceClassification.ONE_TIME, 0.95, f"Matched one-time keyword: '{matched}'")
         
-        # OBVIOUS RECURRING
-        recurring_keywords = [
-            "monthly subscription", "annual subscription", "monthly fee", "annual fee",
-            "saas", "platform", "recurring", "monthly service", "license",
-            "cloud infrastructure management", "managed service", "hosting"
+        # ============================================
+        # 🔥 NEW: FIXED RECURRING KEYWORDS
+        # ============================================
+        fixed_recurring_keywords = [
+            "base", "platform fee", "subscription", "license", "monthly fee",
+            "annual fee", "saas", "managed service", "hosting", "infrastructure",
+            "audit logs", "package", "plan", "tier", "monthly service"
         ]
-        if any(kw in desc_lower for kw in recurring_keywords):
-            matched = [kw for kw in recurring_keywords if kw in desc_lower][0]
-            return (InvoiceClassification.RECURRING, 0.95, f"Matched recurring keyword: '{matched}'")
+        if any(kw in desc_lower for kw in fixed_recurring_keywords):
+            matched = [kw for kw in fixed_recurring_keywords if kw in desc_lower][0]
+            return (InvoiceClassification.RECURRING_FIXED, 0.95, f"Fixed recurring keyword: '{matched}'")
         
         # ADJUSTMENTS
         adjustment_keywords = ["adjustment", "correction", "pro-rata", "prorata", "partial month"]
         if any(kw in desc_lower for kw in adjustment_keywords):
             matched = [kw for kw in adjustment_keywords if kw in desc_lower][0]
             return (InvoiceClassification.ADJUSTMENT, 0.90, f"Matched adjustment keyword: '{matched}'")
+        
+        # Default for large amounts: assume FIXED recurring
+        if amount >= 10000:
+            return (InvoiceClassification.RECURRING_FIXED, 0.6, "Large amount suggests fixed recurring")
         
         # UNKNOWN - needs GPT-4o
         return (InvoiceClassification.UNKNOWN, 0.3, "Ambiguous description - needs AI classification")
@@ -388,19 +545,20 @@ class IntelligentClassifier:
         description: str,
         amount: float,
         invoice_date: Optional[date] = None,
-        contract_keywords: Optional[List[str]] = None
+        contract_keywords: Optional[List[str]] = None,
+        sku: str = ""
     ) -> Tuple[InvoiceClassification, float, str]:
         """
         Classify invoice line item with high accuracy.
         Returns: (classification, confidence, reasoning)
         """
         # Check cache
-        cache_key = f"{description.lower().strip()}_{amount}"
+        cache_key = f"{description.lower().strip()}_{amount}_{sku}"
         if cache_key in self.cache:
             return self.cache[cache_key]
         
         # Try deterministic classification first (covers 90% of cases)
-        classification, confidence, reasoning = self._deterministic_classification(description, amount)
+        classification, confidence, reasoning = self._deterministic_classification(description, amount, sku)
         
         if classification != InvoiceClassification.UNKNOWN:
             result = (classification, confidence, reasoning)
@@ -410,8 +568,8 @@ class IntelligentClassifier:
         # Use GPT-4o for ambiguous cases
         if not self.enabled:
             # Fallback to heuristic
-            if amount > 50000:  # Large regular amount
-                result = (InvoiceClassification.RECURRING, 0.6, "Large amount suggests recurring (fallback)")
+            if amount > 50000:
+                result = (InvoiceClassification.RECURRING_FIXED, 0.6, "Large amount suggests fixed recurring (fallback)")
             else:
                 result = (InvoiceClassification.UNKNOWN, 0.4, "Unable to classify (GPT-4o unavailable)")
             self.cache[cache_key] = result
@@ -425,25 +583,27 @@ class IntelligentClassifier:
         if not is_allowed:
             logger.warning(f"OpenAI rate limit hit for job {self.job_id}: {error_msg}")
             if amount > 50000:
-                result = (InvoiceClassification.RECURRING, 0.6, f"Rate limit hit, using fallback: {error_msg}")
+                result = (InvoiceClassification.RECURRING_FIXED, 0.6, f"Rate limit hit, using fallback: {error_msg}")
             else:
                 result = (InvoiceClassification.UNKNOWN, 0.4, f"Rate limit hit: {error_msg}")
             self.cache[cache_key] = result
             return result
         
         try:
-            prompt = f"""Classify this invoice line: RECURRING, ONE_TIME, or ADJUSTMENT?
+            prompt = f"""Classify this invoice line: RECURRING_FIXED, RECURRING_VARIABLE, ONE_TIME, or ADJUSTMENT?
 
 Description: {description}
 Amount: {amount}
+SKU: {sku or "N/A"}
 {f"Date: {invoice_date}" if invoice_date else ""}
 {f"Contract services: {', '.join(contract_keywords[:5])}" if contract_keywords else ""}
 
-RECURRING = monthly/annual subscription, platform fee, managed service, license
+RECURRING_FIXED = monthly/annual subscription, platform fee, base fee, license (same amount each month)
+RECURRING_VARIABLE = overage charges, usage fees, per-unit charges (varies based on usage)
 ONE_TIME = setup, implementation, training, consulting, migration
 ADJUSTMENT = pro-rata, credit, partial month, correction
 
-JSON only: {{"classification": "RECURRING|ONE_TIME|ADJUSTMENT", "confidence": 0.0-1.0, "reasoning": "..."}}"""
+JSON only: {{"classification": "RECURRING_FIXED|RECURRING_VARIABLE|ONE_TIME|ADJUSTMENT", "confidence": 0.0-1.0, "reasoning": "..."}}"""
 
             response = await self.client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -473,7 +633,9 @@ JSON only: {{"classification": "RECURRING|ONE_TIME|ADJUSTMENT", "confidence": 0.
             
             classification_str = data.get("classification", "UNKNOWN").upper()
             classification_map = {
-                "RECURRING": InvoiceClassification.RECURRING,
+                "RECURRING_FIXED": InvoiceClassification.RECURRING_FIXED,
+                "RECURRING_VARIABLE": InvoiceClassification.RECURRING_VARIABLE,
+                "RECURRING": InvoiceClassification.RECURRING_FIXED,  # Legacy mapping
                 "ONE_TIME": InvoiceClassification.ONE_TIME,
                 "ADJUSTMENT": InvoiceClassification.ADJUSTMENT,
                 "CREDIT": InvoiceClassification.CREDIT
@@ -503,9 +665,6 @@ JSON only: {{"classification": "RECURRING|ONE_TIME|ADJUSTMENT", "confidence": 0.
     ) -> Tuple[bool, float, str, str]:
         """
         Validate if flagged discrepancy is real or false positive.
-        
-        PRECISION IMPROVEMENT: Never skip validation, always run through GPT-4o.
-        
         Returns: (is_valid, confidence, reason, recommended_action)
         """
         if not self.enabled:
@@ -551,19 +710,13 @@ INVOICE LINE:
 CONTRACT TERMS:
 {contract_context}
 
-CRITICAL CONTEXT:
-The contract states that escalation takes effect ON the effective date (not after).
-An invoice dated on or after the effective date MUST use the escalated rate.
-
 ANALYSIS:
 Could this difference be explained by:
-1. Pro-rata (partial month service)? Check if amount is ~50% of expected
+1. Pro-rata (partial month service)?
 2. Service credit applied?
 3. Volume discount?
-4. Data entry error (wrong rate applied)?
+4. Data entry error?
 5. Legitimate one-time adjustment?
-
-If the invoice is dated ON or AFTER the escalation effective date AND shows the old rate with NO indication of pro-rata/adjustment, this is a REAL ERROR.
 
 Respond with ONLY valid JSON:
 {{"is_valid_error": true|false, "confidence": 0.0-1.0, "reason": "brief explanation", "action": "dispute|approve|investigate"}}"""
@@ -578,7 +731,6 @@ Respond with ONLY valid JSON:
                 max_tokens=200
             )
             
-            # Record the call
             tokens_used = response.usage.total_tokens if response.usage else 0
             openai_rate_limit.record_openai_call(
                 self.customer_id,
@@ -696,12 +848,11 @@ async def _parse_invoice_items(
     rows: List[Dict[str, Any]],
     contract_keywords: List[str],
     classifier: IntelligentClassifier,
-    date_format_analysis: DateFormatAnalysis  # NEW: Pass detected date format
+    date_format_analysis: DateFormatAnalysis
 ) -> List[InvoiceLineItem]:
     """
     Parse and classify all invoice line items.
-    
-    PRECISION IMPROVEMENT: Uses detected date format for consistent parsing.
+    NOW WITH FIXED VS VARIABLE DISTINCTION.
     """
     logger.info(f"Parsing {len(rows)} invoice rows...")
     logger.info(f"Using detected date format: {date_format_analysis.detected_format.value} "
@@ -713,19 +864,40 @@ async def _parse_invoice_items(
     for row in rows:
         description = str(_extract_field(row, _DESC_FIELDS) or "")
         amount = _to_float(_extract_field(row, _AMOUNT_FIELDS))
+        
+        if amount == 0:
+            if "total_line_amount" in row:
+                amount = _to_float(row["total_line_amount"])
+            elif "line_amount" in row:
+                amount = _to_float(row["line_amount"])
+
         rate = _to_float(_extract_field(row, _RATE_FIELDS))
+        quantity = _to_float(_extract_field(row, _QTY_FIELDS))
+        sku = str(_extract_field(row, _SKU_FIELDS) or "")
+        
+        # Calculate unit_rate if we have quantity
+        unit_rate = 0.0
+        if rate == 0:
+            unit = _to_float(row.get("unit_price") or row.get("Unit Price"))
+            qty = _to_float(row.get("quantity") or row.get("Quantity"))
+            if unit > 0 and qty > 0:
+                rate = unit * qty
+                unit_rate = unit
+            elif amount > 0 and quantity > 0:
+                unit_rate = amount / quantity
+        else:
+            unit_rate = rate
         
         if rate == 0.0 and amount > 0:
             rate = amount
         
-        # PRECISION IMPROVEMENT: Use detected date format
+        # Parse date with detected format
         raw_date = _extract_field(row, _INVOICE_DATE_FIELDS)
         invoice_date, date_confidence = parse_date_with_format(
             raw_date,
             date_format_analysis.detected_format
         )
         
-        # Track if date was ambiguous
         date_was_ambiguous = (
             date_format_analysis.detected_format in (DateFormat.AMBIGUOUS, DateFormat.MIXED) or
             date_confidence < 0.8
@@ -733,7 +905,9 @@ async def _parse_invoice_items(
         
         invoice_number = str(_extract_field(row, _INVOICE_FIELDS) or "")
         
-        # Store for batch classification
+        # Parse quantity from description for validation
+        parsed_qty, parsed_unit = _parse_quantity_from_description(description)
+        
         tasks.append({
             "row": row,
             "description": description,
@@ -743,6 +917,11 @@ async def _parse_invoice_items(
             "invoice_number": invoice_number,
             "date_confidence": date_confidence,
             "date_was_ambiguous": date_was_ambiguous,
+            "sku": sku,
+            "quantity": quantity,
+            "unit_rate": unit_rate,
+            "parsed_qty": parsed_qty,
+            "parsed_unit": parsed_unit,
         })
     
     # Batch classify all items
@@ -751,7 +930,8 @@ async def _parse_invoice_items(
             t["description"],
             t["amount"],
             t["invoice_date"],
-            contract_keywords
+            contract_keywords,
+            t["sku"]  # NEW: Pass SKU
         )
         for t in tasks
     ])
@@ -770,16 +950,24 @@ async def _parse_invoice_items(
             date_parsing_confidence=task["date_confidence"],
             date_was_ambiguous=task["date_was_ambiguous"],
             classification_reason=reasoning,
+            sku=task["sku"],
+            quantity=task["quantity"],
+            unit_rate=task["unit_rate"],
+            parsed_quantity_from_desc=task["parsed_qty"],
+            parsed_unit_from_desc=task["parsed_unit"],
         ))
     
     # Log classification summary
-    recurring = sum(1 for item in items if item.classification == InvoiceClassification.RECURRING)
+    recurring_fixed = sum(1 for item in items if item.classification == InvoiceClassification.RECURRING_FIXED)
+    recurring_variable = sum(1 for item in items if item.classification == InvoiceClassification.RECURRING_VARIABLE)
+    recurring_legacy = sum(1 for item in items if item.classification == InvoiceClassification.RECURRING)
     onetime = sum(1 for item in items if item.classification == InvoiceClassification.ONE_TIME)
     credits = sum(1 for item in items if item.classification == InvoiceClassification.CREDIT)
     adjustments = sum(1 for item in items if item.classification == InvoiceClassification.ADJUSTMENT)
     ambiguous_dates = sum(1 for item in items if item.date_was_ambiguous)
     
-    logger.info(f"Classification: {recurring} recurring, {onetime} one-time, {credits} credits, {adjustments} adjustments")
+    logger.info(f"Classification: {recurring_fixed} fixed recurring, {recurring_variable} variable (overages), "
+                f"{recurring_legacy} legacy recurring, {onetime} one-time, {credits} credits, {adjustments} adjustments")
     if ambiguous_dates > 0:
         logger.warning(f"⚠️ {ambiguous_dates} invoices have ambiguous dates - reduced confidence")
     
@@ -787,7 +975,203 @@ async def _parse_invoice_items(
 
 
 # ============================================================================
-# INTELLIGENT ESCALATION AUDIT WITH PRECISION
+# 🔥 NEW AUDIT: DUPLICATE CHARGE DETECTION
+# ============================================================================
+
+async def _audit_duplicate_charges(
+    invoice_items: List[InvoiceLineItem],
+    rules: ContractRules,
+    documents: List[Dict[str, Any]],
+) -> List[Discrepancy]:
+    """
+    Detect duplicate charges within the same invoice/period.
+    
+    Key insight: If the same SKU appears twice in the same invoice,
+    it's likely a duplicate unless it's an overage (which can legitimately vary).
+    """
+    discrepancies = []
+    
+    # Filter only FIXED recurring items (not overages - those can legitimately have multiples)
+    fixed_items = [
+        item for item in invoice_items
+        if item.classification == InvoiceClassification.RECURRING_FIXED
+        and item.invoice_date
+    ]
+    
+    # Group by invoice_date + SKU
+    groups: Dict[str, List[InvoiceLineItem]] = defaultdict(list)
+    for item in fixed_items:
+        key = f"{item.invoice_date.isoformat()}_{item.sku}"
+        groups[key].append(item)
+    
+    for key, group_items in groups.items():
+        if len(group_items) <= 1:
+            continue
+        
+        # Multiple items with same SKU on same date = likely duplicate
+        total_charged = sum(item.amount for item in group_items)
+        expected_single = group_items[0].amount
+        overcharge = total_charged - expected_single
+        
+        if overcharge <= 0:
+            continue
+        
+        # Check if there's a credit that offsets this
+        invoice_date = group_items[0].invoice_date
+        credits_on_date = [
+            item for item in invoice_items
+            if item.classification == InvoiceClassification.CREDIT
+            and item.invoice_date == invoice_date
+        ]
+        total_credits = abs(sum(c.amount for c in credits_on_date))
+        
+        # Net overcharge after credits
+        net_overcharge = overcharge - total_credits
+        
+        if net_overcharge <= 0:
+            logger.info(f"✓ Duplicate on {invoice_date} fully offset by credits")
+            continue
+        
+        contract_evidence = _get_clause_references(documents, "billing", limit=1)
+        
+        discrepancies.append(Discrepancy(
+            type=DiscrepancyType.DUPLICATE_CHARGE,
+            priority=Priority.CRITICAL,
+            title=f"Duplicate charge: {group_items[0].description[:50]}",
+            description=(
+                f"SKU '{group_items[0].sku}' charged {len(group_items)} times "
+                f"on {invoice_date}. Total: ₹{total_charged:,.0f}, "
+                f"Expected: ₹{expected_single:,.0f}. "
+                f"Credits applied: ₹{total_credits:,.0f}. "
+                f"Net overcharge: ₹{net_overcharge:,.0f}"
+            ),
+            financial_impact=net_overcharge,
+            invoice_items=group_items + credits_on_date,
+            contract_evidence=contract_evidence,
+            confidence=0.95,
+            recommendations=[
+                f"Request credit for duplicate charge: ₹{net_overcharge:,.0f}",
+                "Verify only one base fee should be charged per period",
+            ],
+            finding_status=FindingStatus.CONFIRMED_DISCREPANCY,
+            validation_reason="Same SKU charged multiple times in same invoice",
+        ))
+    
+    logger.info(f"✓ Duplicate audit: {len(discrepancies)} duplicate charge issues found")
+    return discrepancies
+
+
+# ============================================================================
+# 🔥 NEW AUDIT: OVERAGE RATE/QUANTITY VALIDATION
+# ============================================================================
+
+async def _audit_overage_charges(
+    invoice_items: List[InvoiceLineItem],
+    rules: ContractRules,
+    documents: List[Dict[str, Any]],
+) -> List[Discrepancy]:
+    """
+    Validate overage charges against contract rates.
+    
+    Checks:
+    1. Unit rate matches contract
+    2. Quantity matches description (if parseable)
+    """
+    discrepancies = []
+    
+    # Filter overage items
+    overage_items = [
+        item for item in invoice_items
+        if item.classification == InvoiceClassification.RECURRING_VARIABLE
+        and item.invoice_date
+    ]
+    
+    for item in overage_items:
+        desc_lower = item.description.lower()
+        
+        # Determine overage type and expected rate
+        expected_rate = None
+        overage_type = None
+        
+        if "storage" in desc_lower or "tb" in desc_lower or "gb" in desc_lower:
+            expected_rate = rules.storage_overage_rate
+            overage_type = "storage"
+        elif "compute" in desc_lower or "vcpu" in desc_lower or "cpu" in desc_lower:
+            expected_rate = rules.compute_overage_rate
+            overage_type = "compute"
+        
+        # CHECK 1: Quantity mismatch (description vs billed)
+        if item.parsed_quantity_from_desc is not None and item.quantity > 0:
+            if item.parsed_quantity_from_desc != item.quantity:
+                qty_diff = item.quantity - item.parsed_quantity_from_desc
+                
+                # Calculate impact using unit_rate or expected_rate
+                rate_to_use = item.unit_rate if item.unit_rate > 0 else (expected_rate or 0)
+                impact = qty_diff * rate_to_use
+                
+                if abs(impact) > 100:  # Only flag if significant
+                    contract_evidence = _get_clause_references(documents, "billing", limit=1)
+                    
+                    discrepancies.append(Discrepancy(
+                        type=DiscrepancyType.OVERAGE_QUANTITY_MISMATCH,
+                        priority=Priority.MEDIUM,
+                        title=f"Quantity mismatch: {overage_type or 'overage'} ({item.invoice_date})",
+                        description=(
+                            f"Description says '{item.parsed_quantity_from_desc} {item.parsed_unit_from_desc}', "
+                            f"but billed for {item.quantity} units. "
+                            f"Potential overcharge: ₹{abs(impact):,.0f}"
+                        ),
+                        financial_impact=abs(impact) if impact > 0 else 0,
+                        invoice_items=[item],
+                        contract_evidence=contract_evidence,
+                        confidence=0.80,
+                        recommendations=[
+                            "Verify actual usage for this period",
+                            f"Description indicates {item.parsed_quantity_from_desc} {item.parsed_unit_from_desc}",
+                            f"Billed quantity: {item.quantity}",
+                        ],
+                        finding_status=FindingStatus.NEEDS_REVIEW,
+                        validation_reason="Billed quantity differs from description",
+                    ))
+        
+        # CHECK 2: Rate mismatch (if we have contract rate)
+        if expected_rate and expected_rate > 0 and item.unit_rate > 0:
+            if abs(item.unit_rate - expected_rate) > 1:  # More than ₹1 difference
+                rate_diff = item.unit_rate - expected_rate
+                quantity_used = item.quantity if item.quantity > 0 else 1
+                impact = rate_diff * quantity_used
+                
+                if abs(impact) > 100:
+                    contract_evidence = _get_clause_references(documents, "pricing", limit=1)
+                    
+                    discrepancies.append(Discrepancy(
+                        type=DiscrepancyType.OVERAGE_RATE_MISMATCH,
+                        priority=Priority.HIGH,
+                        title=f"Incorrect {overage_type} overage rate ({item.invoice_date})",
+                        description=(
+                            f"Charged ₹{item.unit_rate:,.0f}/{rules.storage_overage_unit if overage_type == 'storage' else rules.compute_overage_unit}, "
+                            f"contract says ₹{expected_rate:,.0f}. "
+                            f"Overcharge: ₹{abs(impact):,.0f}"
+                        ),
+                        financial_impact=abs(impact) if impact > 0 else 0,
+                        invoice_items=[item],
+                        contract_evidence=contract_evidence,
+                        confidence=0.90,
+                        recommendations=[
+                            f"Verify contract {overage_type} overage rate",
+                            f"Contract rate: ₹{expected_rate:,.0f}",
+                            f"Billed rate: ₹{item.unit_rate:,.0f}",
+                        ],
+                        finding_status=FindingStatus.CONFIRMED_DISCREPANCY,
+                        validation_reason="Unit rate exceeds contract rate",
+                    ))
+    
+    logger.info(f"✓ Overage audit: {len(discrepancies)} overage issues found")
+    return discrepancies
+
+
+# ============================================================================
+# 🔥 FIXED: ESCALATION AUDIT (ONLY FIXED RECURRING)
 # ============================================================================
 
 async def _audit_escalation_clause(
@@ -798,167 +1182,190 @@ async def _audit_escalation_clause(
     pricing_timeline
 ) -> Tuple[List[Discrepancy], List[Discrepancy], List[Discrepancy]]:
     """
-    Audit for pricing discrepancies using the unified timeline.
+    Audit FIXED recurring charges using MONTHLY aggregation.
     
-    PRECISION IMPROVEMENT: Returns three categories:
-    - confirmed: High confidence, surface to client
-    - needs_review: Medium confidence, flag for human
-    - dismissed: Low confidence, filtered out
+    🔥 KEY FIX: Only include RECURRING_FIXED items, NOT overages!
     """
-    # Filter to recurring charges with dates
-    affected_items = [
+
+    # 🔥 FIX: Filter only FIXED recurring items (exclude overages)
+    fixed_recurring_items = [
         item for item in invoice_items
-        if item.is_likely_recurring() and item.invoice_date
+        if item.is_fixed_recurring() and item.invoice_date
     ]
     
-    if not affected_items:
-        logger.info("No recurring charges with dates to audit")
+    if not fixed_recurring_items:
+        # Fallback: try legacy RECURRING classification
+        fixed_recurring_items = [
+            item for item in invoice_items
+            if item.classification == InvoiceClassification.RECURRING
+            and item.invoice_date
+            and not any(kw in item.description.lower() for kw in ["overage", "over-", "additional", "excess"])
+        ]
+    
+    if not fixed_recurring_items:
+        logger.warning("No fixed recurring items found for escalation audit")
         return [], [], []
-    
-    logger.info(f"Auditing {len(affected_items)} recurring charges")
-    
-    # Use tolerance config
-    tolerance_config = ToleranceConfig()
-    
+
+    logger.info(f"Running escalation audit with {len(fixed_recurring_items)} FIXED recurring items")
+
+    # Group by month
+    monthly_groups = defaultdict(list)
+    for item in fixed_recurring_items:
+        month_key = item.invoice_date.strftime("%Y-%m")
+        monthly_groups[month_key].append(item)
+
     confirmed_discrepancies = []
     needs_review_discrepancies = []
     dismissed_discrepancies = []
-    
+
     contract_evidence = _get_clause_references(documents, "cpi_uplift", limit=2)
     has_contract_evidence = len(contract_evidence) > 0
-    
-    # Track processed items to avoid exact duplicates (same invoice + date + rate + amount)
-    # This prevents the same line item from being processed twice
-    processed_items = set()
-    
-    for item in affected_items:
-        # Skip exact duplicates (same invoice number, date, rate, and amount)
-        item_key = f"{item.invoice_number or 'N/A'}_{item.invoice_date.isoformat() if item.invoice_date else 'N/A'}_{item.rate}_{item.amount}"
-        if item_key in processed_items:
-            logger.debug(f"Skipping duplicate invoice item: {item_key}")
-            continue
-        processed_items.add(item_key)
+
+    for month_key, month_items in monthly_groups.items():
+        representative_date = month_items[0].invoice_date
         
-        # Get expected amount from timeline
-        expected_rate, reason = pricing_timeline.get_expected_amount(item.invoice_date)
+        # Get expected amount from pricing timeline
+        expected_amount, reason = pricing_timeline.get_expected_amount(representative_date)
+
+        # 🔥 FIX: Sum FIXED recurring only, DEDUPLICATE by SKU
+        seen_skus = set()
+        actual_billed = 0.0
+        unique_items = []
         
-        logger.debug(f"Invoice {item.invoice_date}: billed={item.rate:,.0f}, expected={expected_rate:,.0f} ({reason})")
-        
-        # Check tolerance
-        tolerance_result = check_amount_tolerance(expected_rate, item.rate, tolerance_config)
-        
-        if tolerance_result.is_within_tolerance:
-            continue
-        
-        # Check for pro-rata
-        pro_rata = detect_pro_rata(item.rate, expected_rate, item.description)
-        if pro_rata.is_likely_pro_rata and pro_rata.confidence > 0.7:
-            logger.info(f"Pro-rata detected: {item.description[:50]} - {pro_rata.reason}")
-            continue
-        
-        # Calculate difference
-        difference = expected_rate - item.rate
-        
-        # PRECISION IMPROVEMENT: Always validate with GPT-4o (no "obvious" bypass)
-        is_valid, validation_confidence, validation_reason, action = await classifier.validate_discrepancy(
-            item,
-            expected_rate,
-            f"Expected: ₹{expected_rate:,.0f} ({reason}). Escalation rate: {rules.escalation_rate*100}%"
+        for item in month_items:
+            if item.sku in seen_skus:
+                continue  # Skip duplicates (handled by duplicate audit)
+            seen_skus.add(item.sku)
+            actual_billed += item.rate if item.rate > 0 else item.amount
+            unique_items.append(item)
+
+        difference = expected_amount - actual_billed
+
+        logger.info(
+            f"[{month_key}] expected={expected_amount:,.0f}, billed={actual_billed:,.0f}, diff={difference:,.0f}"
         )
-        
-        if not is_valid:
-            # False positive detected
-            logger.info(f"False positive filtered: {validation_reason}")
+
+        # Tolerance check
+        tolerance_result = check_amount_tolerance(expected_amount, actual_billed)
+        if tolerance_result.is_within_tolerance:
+            logger.info(f"[{month_key}] ✓ Within tolerance: {tolerance_result.reason}")
             continue
-        
-        # Build confidence breakdown
+
+        # Pro-rata check
+        pro_rata = detect_pro_rata(actual_billed, expected_amount, month_items[0].description)
+        if pro_rata.is_likely_pro_rata and pro_rata.confidence > 0.7:
+            logger.info(f"[{month_key}] ✓ Pro-rata detected: {pro_rata.reason}")
+            continue
+
+        # GPT validation
+        primary_item = max(unique_items, key=lambda x: x.effective_confidence())
+        is_valid, validation_conf, validation_reason, action = await classifier.validate_discrepancy(
+            primary_item,
+            expected_amount,
+            f"Expected monthly FIXED charge ₹{expected_amount:,.0f}. {reason}"
+        )
+
+        if not is_valid:
+            logger.info(f"[{month_key}] False positive removed: {validation_reason}")
+            dismissed_discrepancies.append(Discrepancy(
+                type=DiscrepancyType.INCORRECT_RATE,
+                priority=Priority.LOW,
+                title=f"Dismissed: {month_key}",
+                description=validation_reason,
+                financial_impact=difference,
+                invoice_items=unique_items,
+                contract_evidence=[],
+                confidence=0.3,
+                recommendations=[],
+                finding_status=FindingStatus.LIKELY_FALSE_POSITIVE,
+                validation_reason=validation_reason,
+            ))
+            continue
+
+        # Build confidence
         confidence_builder = ConfidenceBuilder()
         confidence_builder.with_classification(
-            item.confidence,
-            item.classification_reason
+            primary_item.confidence, primary_item.classification_reason
         )
         confidence_builder.with_date_parsing(
-            item.date_parsing_confidence,
-            "Unambiguous date" if not item.date_was_ambiguous else "Ambiguous date format"
+            primary_item.date_parsing_confidence,
+            "Date parsed reliably" if not primary_item.date_was_ambiguous else "Ambiguous date"
         )
         confidence_builder.with_amount_match(
-            1.0 - tolerance_result.percentage_difference,  # Higher diff = lower confidence
-            f"Difference: ₹{abs(difference):,.0f} ({tolerance_result.percentage_difference*100:.1f}%)"
+            1.0 - tolerance_result.percentage_difference,
+            f"Monthly difference: ₹{abs(difference):,.0f} ({tolerance_result.percentage_difference*100:.1f}%)"
         )
         confidence_builder.with_contract_extraction(
             rules.extraction_confidence,
-            "Contract terms extracted successfully" if rules.extraction_confidence > 0.7 else "Low extraction confidence"
+            "Contract extracted reliably"
         )
-        confidence_builder.with_validation(
-            validation_confidence,
-            validation_reason
-        )
-        
-        # Add penalty if no contract evidence
+        confidence_builder.with_validation(validation_conf, validation_reason)
+
         if not has_contract_evidence:
             confidence_builder.with_additional_factor(
                 "Contract Evidence",
                 CONFIDENCE_REDUCTION_NO_CONTRACT_EVIDENCE,
                 1.0,
-                "No matching clause found in contract"
+                "No matching escalation clause found"
             )
-        
+
         confidence_breakdown = confidence_builder.build()
         overall_confidence = confidence_breakdown.overall()
-        
-        # Classify finding status
+
+        # Classify finding
         finding_status = classify_finding(
             confidence=overall_confidence,
             financial_impact=difference,
             has_contract_evidence=has_contract_evidence,
-            validation_passed=is_valid and validation_confidence > 0.7
+            validation_passed=is_valid and validation_conf > 0.7
         )
-        
-        # Determine priority
+
         if finding_status == FindingStatus.CONFIRMED_DISCREPANCY:
-            priority = Priority.CRITICAL if difference > rules.base_amount * 0.1 else Priority.HIGH
+            priority = Priority.CRITICAL if abs(difference) > rules.base_amount * 0.1 else Priority.HIGH
         elif finding_status == FindingStatus.NEEDS_REVIEW:
             priority = Priority.MEDIUM
         else:
             priority = Priority.LOW
-        
+
         discrepancy = Discrepancy(
-            type=DiscrepancyType.MISSING_ESCALATION,
+            type=DiscrepancyType.MISSING_ESCALATION if difference > 0 else DiscrepancyType.INCORRECT_RATE,
             priority=priority,
-            title=f"Price escalation not applied ({rules.escalation_rate*100}%)",
-            description=f"Invoice dated {item.invoice_date} shows rate of ₹{item.rate:,.2f} instead of expected ₹{expected_rate:,.2f}. {reason}",
+            title=f"Incorrect fixed recurring amount ({month_key})",
+            description=(
+                f"For {month_key}, billed ₹{actual_billed:,.2f} "
+                f"instead of expected ₹{expected_amount:,.2f}. {reason}"
+            ),
             financial_impact=difference,
-            invoice_items=[item],
+            invoice_items=unique_items,
             contract_evidence=contract_evidence,
             confidence=overall_confidence,
             recommendations=[
-                f"Review invoice {item.invoice_number or 'N/A'}",
-                f"Expected rate: ₹{expected_rate:,.2f} {rules.currency}",
-                f"Reason: {reason}",
-                f"Action: {action}"
+                f"Review {len(unique_items)} fixed recurring charges for {month_key}",
+                f"Expected: ₹{expected_amount:,.2f} {rules.currency}",
+                f"Actual billed: ₹{actual_billed:,.2f}",
+                f"Action: {action}",
             ],
             confidence_breakdown=confidence_breakdown,
             finding_status=finding_status,
             validation_reason=validation_reason,
         )
-        
-        # Categorize by finding status
+
         if finding_status == FindingStatus.CONFIRMED_DISCREPANCY:
             confirmed_discrepancies.append(discrepancy)
         elif finding_status == FindingStatus.NEEDS_REVIEW:
             needs_review_discrepancies.append(discrepancy)
         else:
             dismissed_discrepancies.append(discrepancy)
-    
-    logger.info(f"✓ Audit results: {len(confirmed_discrepancies)} confirmed, "
+
+    logger.info(f"✓ Escalation audit: {len(confirmed_discrepancies)} confirmed, "
                 f"{len(needs_review_discrepancies)} needs review, "
                 f"{len(dismissed_discrepancies)} dismissed")
-    
+
     return confirmed_discrepancies, needs_review_discrepancies, dismissed_discrepancies
 
 
 # ============================================================================
-# INTELLIGENT SLA CREDIT AUDIT
+# SLA CREDIT AUDIT
 # ============================================================================
 
 async def _audit_sla_credits(
@@ -967,9 +1374,7 @@ async def _audit_sla_credits(
     documents: List[Dict[str, Any]],
     total_billed: float
 ) -> Optional[Discrepancy]:
-    """
-    Audit for missing SLA credits with intelligent detection.
-    """
+    """Audit for missing SLA credits with intelligent detection."""
     if rules.sla_uptime is None:
         return None
     
@@ -989,7 +1394,6 @@ async def _audit_sla_credits(
         estimated_impact = total_billed * 0.01
         contract_evidence = _get_clause_references(documents, "service_credits", limit=2)
         
-        # Build confidence
         confidence_builder = ConfidenceBuilder()
         confidence_builder.with_classification(0.7, "Downtime indicators found in invoices")
         confidence_builder.with_validation(0.6, "No credits issued despite downtime references")
@@ -1061,11 +1465,7 @@ def _get_clause_references(documents: List[Dict[str, Any]] | None, label: str, l
 
 
 def _extract_contract_rules(llm_insights: Dict[str, Any]) -> ContractRules:
-    """
-    Extract and validate contract rules from LLM insights.
-    
-    PRECISION IMPROVEMENT: Validates extracted terms and tracks confidence.
-    """
+    """Extract and validate contract rules from LLM insights."""
     rules_data = llm_insights.get("rules", {})
     
     # Get GPT-4o terms for validation
@@ -1091,7 +1491,6 @@ def _extract_contract_rules(llm_insights: Dict[str, Any]) -> ContractRules:
     escalation_rate = float(rules_data.get("escalation_rate", 0))
     effective_date_str = rules_data.get("effective_start_date", "")
     
-    # Parse effective date with confidence tracking
     effective_date = None
     if effective_date_str:
         try:
@@ -1111,6 +1510,33 @@ def _extract_contract_rules(llm_insights: Dict[str, Any]) -> ContractRules:
     service_credit_rate = rules_data.get("service_credit_rate")
     amendment_history = rules_data.get("amendment_history", [])
     
+    # 🔥 NEW: Extract overage rates
+    storage_overage_rate = rules_data.get("storage_overage_rate")
+    compute_overage_rate = rules_data.get("compute_overage_rate")
+    
+    # Try to extract from contract text if not in rules
+    if not storage_overage_rate or not compute_overage_rate:
+        for doc in llm_insights.get("documents", []):
+            full_text = doc.get("full_text", "")
+            if full_text:
+                # Storage overage pattern
+                storage_match = re.search(
+                    r'Storage\s*Overage\s*[:=-]?\s*(?:INR|₹|\$)?\s*([\d,]+)\s*(?:per|/)\s*(TB|GB)',
+                    full_text, re.IGNORECASE
+                )
+                if storage_match and not storage_overage_rate:
+                    storage_overage_rate = float(storage_match.group(1).replace(",", ""))
+                    logger.info(f"Extracted storage overage rate: ₹{storage_overage_rate}/{storage_match.group(2)}")
+                
+                # Compute overage pattern
+                compute_match = re.search(
+                    r'Compute\s*Overage\s*[:=-]?\s*(?:INR|₹|\$)?\s*([\d,]+)\s*(?:per|/)\s*(vCPU|CPU)',
+                    full_text, re.IGNORECASE
+                )
+                if compute_match and not compute_overage_rate:
+                    compute_overage_rate = float(compute_match.group(1).replace(",", ""))
+                    logger.info(f"Extracted compute overage rate: ₹{compute_overage_rate}/{compute_match.group(2)}")
+    
     rules = ContractRules(
         base_amount=base_amount,
         escalation_rate=escalation_rate,
@@ -1124,9 +1550,10 @@ def _extract_contract_rules(llm_insights: Dict[str, Any]) -> ContractRules:
         extraction_confidence=extraction_confidence,
         needs_review=needs_review,
         validation_warnings=validation_warnings,
+        storage_overage_rate=storage_overage_rate,
+        compute_overage_rate=compute_overage_rate,
     )
     
-    # Validate
     is_valid, issues = rules.validate()
     if not is_valid:
         logger.warning(f"Contract rules validation issues: {', '.join(issues)}")
@@ -1134,6 +1561,7 @@ def _extract_contract_rules(llm_insights: Dict[str, Any]) -> ContractRules:
         if amendment_history:
             logger.info(f"✓ Amendment history: {len(amendment_history)} price changes tracked")
         logger.info(f"✓ Final rules: base={base_amount}, escalation={escalation_rate*100}%, effective={effective_date}")
+        logger.info(f"✓ Overage rates: storage=₹{storage_overage_rate}/TB, compute=₹{compute_overage_rate}/vCPU")
         logger.info(f"✓ Extraction confidence: {extraction_confidence:.0%}")
     
     if validation_warnings:
@@ -1186,19 +1614,16 @@ async def run(job, llm_insights: Dict) -> Dict:
     """
     Production-grade intelligent reconciliation pipeline.
     
-    PRECISION IMPROVEMENTS:
-    1. Date format detection at file level
-    2. Percentage-based + absolute tolerance
-    3. Propagated confidence scoring
-    4. Contract term validation
-    5. No "obvious" bypass - always validate
-    6. Confidence explainer for every discrepancy
-    7. "Hold for Review" category for medium-confidence findings
+    🔥 FIXES IN THIS VERSION:
+    1. Separate RECURRING_FIXED vs RECURRING_VARIABLE
+    2. Duplicate charge detection
+    3. Overage rate/quantity validation
+    4. Proper monthly aggregation (fixed only)
     """
     await job_manager.simulate_latency(0.1)
     
     logger.info("="*70)
-    logger.info("STARTING INTELLIGENT RECONCILIATION (PRECISION MODE)")
+    logger.info("STARTING INTELLIGENT RECONCILIATION (PRECISION MODE v2)")
     logger.info("="*70)
     
     start_time = datetime.now()
@@ -1208,29 +1633,29 @@ async def run(job, llm_insights: Dict) -> Dict:
     _classifier = IntelligentClassifier(customer_id=customer_id, job_id=job.id)
     
     # Step 1: Load billing data
-    logger.info("[1/7] Loading billing data...")
+    logger.info("[1/8] Loading billing data...")
     billing_rows = _load_billing_rows(job)
+    # 🔥 FIX: Deduplicate invoices across files
+    billing_rows = deduplicate_billing_rows(billing_rows)
     billing_summary = _summarize_billing(billing_rows)
     
-    # Step 2: PRECISION IMPROVEMENT - Detect date format
-    logger.info("[2/7] Detecting date format...")
+    # Step 2: Detect date format
+    logger.info("[2/8] Detecting date format...")
     date_format_analysis = detect_date_format(billing_rows, _INVOICE_DATE_FIELDS)
     
     if not date_format_analysis.is_reliable():
         logger.warning(f"⚠️ Date format detection unreliable: {date_format_analysis.detected_format.value}")
-        logger.warning(f"   Evidence: {date_format_analysis.evidence}")
-        logger.warning(f"   Ambiguous dates: {date_format_analysis.ambiguous_count}")
     else:
         logger.info(f"✓ Detected date format: {date_format_analysis.detected_format.value} "
                    f"(confidence: {date_format_analysis.confidence:.0%})")
     
     # Step 3: Extract and validate contract rules
-    logger.info("[3/7] Extracting and validating contract rules...")
+    logger.info("[3/8] Extracting and validating contract rules...")
     rules_dict = llm_insights.get("rules", {})
     rules = _extract_contract_rules(llm_insights)
     
     # Step 4: Build unified pricing timeline
-    logger.info("[4/7] Building unified pricing timeline...")
+    logger.info("[4/8] Building unified pricing timeline...")
     
     if "base_start_date" not in rules_dict:
         contract_terms = llm_insights.get("gpt4o_contract_terms", {})
@@ -1250,20 +1675,34 @@ async def run(job, llm_insights: Dict) -> Dict:
     logger.info(f"📅 Built pricing timeline with {len(pricing_timeline.periods) if pricing_timeline else 0} periods")
     
     # Step 5: Parse and classify invoice items
-    logger.info("[5/7] Classifying invoice line items...")
+    logger.info("[5/8] Classifying invoice line items...")
     invoice_items = await _parse_invoice_items(
         billing_rows,
         rules.invoice_keywords,
         _classifier,
-        date_format_analysis  # NEW: Pass date format
+        date_format_analysis
     )
     
     # Step 6: Run intelligent audits
-    logger.info("[6/7] Running intelligent audits with precision mode...")
+    logger.info("[6/8] Running intelligent audits...")
     
     documents = job.metrics.get("documents") if isinstance(job.metrics.get("documents"), list) else None
     
-    # Audit 1: Price escalation with categorization
+    # 🔥 NEW: Audit 1 - Duplicate charges
+    duplicate_discrepancies = await _audit_duplicate_charges(
+        invoice_items,
+        rules,
+        documents,
+    )
+    
+    # 🔥 NEW: Audit 2 - Overage rate/quantity validation
+    overage_discrepancies = await _audit_overage_charges(
+        invoice_items,
+        rules,
+        documents,
+    )
+    
+    # Audit 3: Fixed recurring escalation (FIXED to exclude overages)
     confirmed, needs_review, dismissed = await _audit_escalation_clause(
         invoice_items,
         rules,
@@ -1272,7 +1711,7 @@ async def run(job, llm_insights: Dict) -> Dict:
         pricing_timeline
     )
     
-    # Audit 2: SLA credits
+    # Audit 4: SLA credits
     sla_discrepancy = await _audit_sla_credits(
         invoice_items,
         rules,
@@ -1286,55 +1725,51 @@ async def run(job, llm_insights: Dict) -> Dict:
         else:
             needs_review.append(sla_discrepancy)
     
-    # Step 7: Finalize results
-    logger.info("[7/7] Finalizing results...")
+    # Combine all discrepancies
+    confirmed.extend(duplicate_discrepancies)  # Duplicates are always confirmed
+    needs_review.extend(overage_discrepancies)  # Overage issues need review
     
-    # Only surface confirmed + needs_review to client
+    # Step 7: Finalize results
+    logger.info("[7/8] Finalizing results...")
+    
     all_discrepancies = confirmed + needs_review
     
-    # Group discrepancies by invoice to avoid double-counting
-    # If the same invoice appears in multiple discrepancies, only count it once
+    # Calculate totals (avoid double-counting same invoice)
     invoice_discrepancy_map = {}
     for d in all_discrepancies:
         for item in d.invoice_items:
             if not item.invoice_date:
                 continue
-            # Create key: invoice_number + invoice_date (unique per invoice)
-            invoice_key = f"{item.invoice_number or 'N/A'}_{item.invoice_date.isoformat()}"
-            # Store the maximum financial impact for this invoice
-            # (in case the same invoice appears in multiple discrepancies)
+            invoice_key = f"{item.invoice_number or 'N/A'}_{item.invoice_date.isoformat()}_{d.type.value}"
             if invoice_key not in invoice_discrepancy_map:
                 invoice_discrepancy_map[invoice_key] = d.financial_impact
             else:
-                # If same invoice appears multiple times, take the max (should be same, but be safe)
                 invoice_discrepancy_map[invoice_key] = max(invoice_discrepancy_map[invoice_key], d.financial_impact)
     
-    # Calculate total recoverable from unique invoices only
     total_recoverable = sum(invoice_discrepancy_map.values())
     
-    # Calculate confirmed recoverable (only from confirmed discrepancies)
     confirmed_invoice_map = {}
     for d in confirmed:
         for item in d.invoice_items:
             if not item.invoice_date:
                 continue
-            invoice_key = f"{item.invoice_number or 'N/A'}_{item.invoice_date.isoformat()}"
+            invoice_key = f"{item.invoice_number or 'N/A'}_{item.invoice_date.isoformat()}_{d.type.value}"
             if invoice_key not in confirmed_invoice_map:
                 confirmed_invoice_map[invoice_key] = d.financial_impact
             else:
                 confirmed_invoice_map[invoice_key] = max(confirmed_invoice_map[invoice_key], d.financial_impact)
     confirmed_recoverable = sum(confirmed_invoice_map.values())
+    
     audit_time = (datetime.now() - start_time).total_seconds()
     
     # Update job metrics
     job.metrics["billing_summary"] = billing_summary
     job.metrics["recoverable_amount"] = round(total_recoverable, 2)
-    job.metrics["confirmed_recoverable"] = round(confirmed_recoverable, 2)  # NEW
+    job.metrics["confirmed_recoverable"] = round(confirmed_recoverable, 2)
     job.metrics["currency"] = rules.currency
     job.metrics["gpt4o_enhanced"] = True
-    job.metrics["precision_mode"] = True  # NEW
+    job.metrics["precision_mode"] = True
     
-    # NEW: Date format analysis
     job.metrics["date_format_analysis"] = {
         "detected_format": date_format_analysis.detected_format.value,
         "confidence": date_format_analysis.confidence,
@@ -1343,7 +1778,6 @@ async def run(job, llm_insights: Dict) -> Dict:
         "is_reliable": date_format_analysis.is_reliable(),
     }
     
-    # NEW: Discrepancy categorization
     job.metrics["discrepancy_summary"] = {
         "confirmed_count": len(confirmed),
         "confirmed_value": round(confirmed_recoverable, 2),
@@ -1353,23 +1787,26 @@ async def run(job, llm_insights: Dict) -> Dict:
         "dismissed_value": round(sum(d.financial_impact for d in dismissed), 2),
     }
     
-    # NEW: Contract extraction quality
     job.metrics["extraction_quality"] = {
         "confidence": rules.extraction_confidence,
         "needs_review": rules.needs_review,
         "warnings": rules.validation_warnings,
     }
     
-    # Store pricing timeline data
+    # Step 8: Build pricing timeline for output
+    logger.info("[8/8] Building output pricing timeline...")
+    
     pricing_periods = []
     if pricing_timeline and pricing_timeline.periods:
         for idx, period in enumerate(pricing_timeline.periods):
             period_start = period.start_date
             period_end = pricing_timeline.periods[idx + 1].start_date if idx < len(pricing_timeline.periods) - 1 else date.today()
             
+            # Only include FIXED recurring items in period breakdown
             period_invoices = [
                 item for item in invoice_items
                 if item.invoice_date and period_start <= item.invoice_date < period_end
+                and item.classification in (InvoiceClassification.RECURRING_FIXED, InvoiceClassification.RECURRING)
             ]
             
             period_discrepancies = [
@@ -1380,80 +1817,47 @@ async def run(job, llm_insights: Dict) -> Dict:
                 )
             ]
             
-            # Group invoices by MONTH ONLY to show one entry per month
-            # Aggregate all invoices/line items in the same month together
+            # Group by month, deduplicate by SKU
             invoice_breakdown_map = {}
-            
-            # Track processed items to avoid exact duplicates
-            processed_items = set()
             
             for item in period_invoices:
                 if not item.invoice_date:
                     continue
                 
-                # Skip exact duplicates (same invoice number, date, rate, and amount)
-                item_key = f"{item.invoice_number or 'N/A'}_{item.invoice_date.isoformat()}_{item.rate}_{item.amount}"
-                if item_key in processed_items:
-                    logger.debug(f"Skipping duplicate invoice item in breakdown: {item_key}")
-                    continue
-                processed_items.add(item_key)
-                
-                expected_amount, _ = pricing_timeline.get_expected_amount(item.invoice_date)
-                billed_amount = item.rate if item.rate > 0 else item.amount
-                
                 month_key = item.invoice_date.strftime("%b %Y")
-                invoice_number = item.invoice_number or "N/A"
-                invoice_date_str = item.invoice_date.isoformat()
                 
-                # Create unique key: MONTH ONLY (one entry per month)
-                unique_key = month_key
-                
-                # If this month already exists, aggregate the amounts
-                if unique_key in invoice_breakdown_map:
-                    existing = invoice_breakdown_map[unique_key]
-                    # Sum billed amounts for all invoices/line items in this month
-                    existing["billed"] = round(existing["billed"] + billed_amount, 2)
-                    # Expected should be the same for all invoices in the same month (same rate)
-                    # Keep the expected amount (should be consistent for the month)
-                    # Recalculate difference based on aggregated billed amount
-                    existing["difference"] = round(existing["expected"] - existing["billed"], 2)
-                    # Has discrepancy if difference is significant (either under or over billing)
-                    existing["has_discrepancy"] = abs(existing["difference"]) > 2.0
-                    # Keep highest confidence
-                    existing["confidence"] = max(existing["confidence"], round(item.effective_confidence(), 3))
-                    # Keep earliest invoice date for the month
-                    if invoice_date_str < existing["invoice_date"]:
-                        existing["invoice_date"] = invoice_date_str
-                    # Collect invoice numbers (comma-separated if multiple)
-                    if invoice_number != "N/A":
-                        existing_invoices = existing.get("invoice_number", "N/A")
-                        if existing_invoices == "N/A":
-                            existing["invoice_number"] = invoice_number
-                        elif invoice_number not in existing_invoices:
-                            existing["invoice_number"] = f"{existing_invoices}, {invoice_number}"
-                else:
-                    # First time seeing this month
-                    invoice_breakdown_map[unique_key] = {
+                if month_key not in invoice_breakdown_map:
+                    expected_amount, _ = pricing_timeline.get_expected_amount(item.invoice_date)
+                    invoice_breakdown_map[month_key] = {
                         "month": month_key,
-                        "invoice_date": invoice_date_str,
+                        "invoice_date": item.invoice_date.isoformat(),
                         "expected": round(expected_amount, 2),
-                        "billed": round(billed_amount, 2),
-                        "difference": round(expected_amount - billed_amount, 2),
-                        "has_discrepancy": abs(expected_amount - billed_amount) > 2.0,
-                        "invoice_number": invoice_number,
-                        "description": "",  # Will be set from discrepancies if needed
-                        "confidence": round(item.effective_confidence(), 3),
+                        "billed": 0.0,
+                        "skus_seen": set(),
+                        "confidence": 0.0,
                         "date_was_ambiguous": item.date_was_ambiguous,
                     }
+                
+                entry = invoice_breakdown_map[month_key]
+                
+                # Deduplicate by SKU
+                if item.sku and item.sku in entry["skus_seen"]:
+                    continue
+                if item.sku:
+                    entry["skus_seen"].add(item.sku)
+                
+                billed_amount = item.rate if item.rate > 0 else item.amount
+                entry["billed"] = round(entry["billed"] + billed_amount, 2)
+                entry["confidence"] = max(entry["confidence"], round(item.effective_confidence(), 3))
             
-            # Convert map to list and sort by date
-            invoice_breakdown = list(invoice_breakdown_map.values())
-            invoice_breakdown.sort(key=lambda x: x["invoice_date"])
+            # Finalize breakdown
+            invoice_breakdown = []
+            for month_key, entry in sorted(invoice_breakdown_map.items(), key=lambda x: x[1]["invoice_date"]):
+                entry["difference"] = round(entry["expected"] - entry["billed"], 2)
+                entry["has_discrepancy"] = abs(entry["difference"]) > 2.0
+                del entry["skus_seen"]  # Remove internal tracking
+                invoice_breakdown.append(entry)
             
-            # Calculate total leakage (underbilling: positive difference means we're missing money)
-            # difference = expected - billed
-            # Positive difference = underbilling (we're missing money, should be billed more)
-            # Negative difference = overbilling (we were billed too much, but that's not "missing" in the same sense)
             total_leakage = sum(
                 inv["difference"] for inv in invoice_breakdown
                 if inv["has_discrepancy"] and inv["difference"] > 0
@@ -1478,18 +1882,22 @@ async def run(job, llm_insights: Dict) -> Dict:
         "currency": rules.currency,
         "amendment_history": rules.amendment_history or [],
         "pricing_timeline": pricing_periods,
-        "extraction_confidence": rules.extraction_confidence,  # NEW
-        "validation_warnings": rules.validation_warnings,  # NEW
+        "extraction_confidence": rules.extraction_confidence,
+        "validation_warnings": rules.validation_warnings,
+        "storage_overage_rate": rules.storage_overage_rate,
+        "compute_overage_rate": rules.compute_overage_rate,
     }
     
     job.metrics["audit_time_seconds"] = audit_time
     job.metrics["classification_stats"] = {
         "total_items": len(invoice_items),
+        "recurring_fixed": sum(1 for item in invoice_items if item.classification == InvoiceClassification.RECURRING_FIXED),
+        "recurring_variable": sum(1 for item in invoice_items if item.classification == InvoiceClassification.RECURRING_VARIABLE),
         "recurring": sum(1 for item in invoice_items if item.classification == InvoiceClassification.RECURRING),
         "one_time": sum(1 for item in invoice_items if item.classification == InvoiceClassification.ONE_TIME),
         "credits": sum(1 for item in invoice_items if item.classification == InvoiceClassification.CREDIT),
         "adjustments": sum(1 for item in invoice_items if item.classification == InvoiceClassification.ADJUSTMENT),
-        "ambiguous_dates": sum(1 for item in invoice_items if item.date_was_ambiguous),  # NEW
+        "ambiguous_dates": sum(1 for item in invoice_items if item.date_was_ambiguous),
     }
     
     # Convert discrepancies to API format
@@ -1499,14 +1907,14 @@ async def run(job, llm_insights: Dict) -> Dict:
 
     # Log summary
     logger.info("="*70)
-    logger.info(f"RECONCILIATION COMPLETE (PRECISION MODE)")
+    logger.info(f"RECONCILIATION COMPLETE (PRECISION MODE v2)")
     logger.info(f"  Time: {audit_time:.2f}s")
+    logger.info(f"  Duplicate charges found: {len(duplicate_discrepancies)}")
+    logger.info(f"  Overage issues found: {len(overage_discrepancies)}")
     logger.info(f"  Confirmed discrepancies: {len(confirmed)} (₹{confirmed_recoverable:,.2f})")
     logger.info(f"  Needs review: {len(needs_review)}")
     logger.info(f"  Dismissed (false positives): {len(dismissed)}")
     logger.info(f"  Total recoverable: ₹{total_recoverable:,.2f} {rules.currency}")
-    logger.info(f"  Date format reliability: {'✓' if date_format_analysis.is_reliable() else '⚠️'}")
-    logger.info(f"  Extraction confidence: {rules.extraction_confidence:.0%}")
     logger.info("="*70)
     
     return {

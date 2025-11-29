@@ -23,7 +23,26 @@ ALLOWED_CONTRACT_EXTENSIONS = {".pdf", ".doc", ".docx"}
 ALLOWED_BILLING_EXTENSIONS = {".csv", ".xlsx", ".xls"}
 
 # Flexible field name variations (matching reconciliation.py)
-_AMOUNT_FIELDS = ["amount", "Amount", "value", "Value", "total", "Total", "charge", "Charge", "billed", "Billed", "Amount Billed", "Billed Amount"]
+# Flexible field name variations (extended for real invoice data)
+_AMOUNT_FIELDS = [
+    # Common invoice line fields
+    "total_line_amount",
+    "line_amount",
+    "amount",
+    "Amount",
+    "value",
+    "Value",
+    "total",
+    "Total",
+    "charge",
+    "Charge",
+    "billed",
+    "Billed",
+    "Amount Billed",
+    "Billed Amount",
+    "subtotal",
+    "Subtotal"
+]
 _INVOICE_DATE_FIELDS = ["Invoice_Date", "invoice_date", "Date", "date", "InvoiceDate", "Invoice Date", "Transaction Date", "Billing Date"]
 _INVOICE_FIELDS = ["InvoiceNumber", "invoiceNumber", "Invoice", "invoice", "Number", "number", "Id", "ID", "Invoice_No", "Invoice #", "Invoice No", "Ref", "Reference"]
 _DESC_FIELDS = ["Item_Desc", "item_desc", "Description", "description", "Memo", "memo", "Activity", "Item Description", "Line Description", "Service", "Product"]
@@ -141,13 +160,22 @@ class DataValidator:
     """Validates data content of files."""
 
     @staticmethod
-    def _find_field(headers: List[str], field_variations: List[str]) -> Optional[str]:
-        """Find a field in headers using flexible matching."""
-        headers_lower = {h.lower().strip(): h for h in headers if h}
+    def _find_field(headers, field_variations):
+        headers_clean = [h.lower().strip() for h in headers if h]
+
+        # Exact matching first
         for variation in field_variations:
-            if variation.lower() in headers_lower:
-                return headers_lower[variation.lower()]
+            if variation.lower() in headers_clean:
+                return headers[headers_clean.index(variation.lower())]
+
+        # Fallback: "contains" matching
+        for variation in field_variations:
+            for idx, header in enumerate(headers_clean):
+                if variation.lower() in header:
+                    return headers[idx]
+
         return None
+
 
     @staticmethod
     async def validate_billing_data(file: UploadFile) -> Tuple[bool, Optional[str]]:

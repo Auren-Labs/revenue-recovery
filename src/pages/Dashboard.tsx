@@ -468,6 +468,10 @@ const Dashboard = () => {
   const llmSummary = metrics.llm_summary as string | undefined;
   const clauseHits = metrics.total_clauses ?? 0;
   const recoverableAmount = metrics.recoverable_amount ?? 0;
+  const displayRecoverable = Math.max(0, recoverableAmount);
+  const hasPositiveLeakage = recoverableAmount > 0;
+  const isNoLeakage = recoverableAmount <= 0;
+  
   // Deduplicate documents by filename to avoid showing duplicates
   // (same file might appear with different storage paths - local vs supabase)
   const allDocuments = (metrics.documents as ExtractedDocument[] | undefined) ?? [];
@@ -1131,82 +1135,52 @@ const chartFriendlyLabel = {
           </div>
         </header>
 
-        {/* 🎯 HERO METRIC: Recoverable Revenue - The Star of the Show */}
-        {recoverableAmount > 0 && (
-          <section className="relative rounded-3xl border-2 border-primary/30 bg-gradient-to-br from-primary/10 via-primary/5 to-card/90 backdrop-blur-xl p-8 md:p-12 shadow-2xl shadow-primary/10 overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-700">
-            {/* Subtle background effects */}
-            <div className="absolute inset-0 bg-gradient-radial from-primary/5 via-transparent to-transparent opacity-50" />
-            <div className="absolute top-0 right-0 w-64 h-64 bg-primary/5 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2" />
-            
-            <div className="relative z-10 flex flex-col md:flex-row md:items-center md:justify-between gap-8">
-              <div className="flex-1 space-y-4">
-                <div className="flex items-center gap-3">
-                  <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-primary/30 to-primary/10 border-2 border-primary/40 flex items-center justify-center shadow-lg">
-                    <Zap className="h-7 w-7 text-primary" />
-                  </div>
-                  <div>
-                    <p className="text-sm font-semibold uppercase tracking-wider text-primary/80 mb-1">
-                      Found in this audit
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {discrepancies.length} {discrepancies.length === 1 ? 'discrepancy' : 'discrepancies'} across {billingSummary.invoice_count ?? 0} invoices
-                    </p>
-                  </div>
-                </div>
-                <div className="space-y-3">
-                  <h2 className="text-5xl md:text-6xl lg:text-7xl font-bold bg-gradient-to-r from-foreground via-foreground/95 to-foreground/80 bg-clip-text text-transparent leading-tight">
-                    {formatCurrency(recoverableAmount, contractCurrency)}
-                  </h2>
-                  <p className="text-xl md:text-2xl text-muted-foreground font-medium">
-                    Recoverable Revenue
-                  </p>
-                  {(() => {
-                    const totalBilled = billingSummary.total_billed || 1;
-                    const leakagePercentage = (recoverableAmount / totalBilled) * 100;
-                    return (
-                      <div className="flex items-center gap-3 pt-2">
-                        <span className="text-sm text-muted-foreground">
-                          {leakagePercentage.toFixed(1)}% of total billed
-                        </span>
-                        {leakagePercentage > 5 && (
-                          <span className="px-3 py-1.5 rounded-full bg-destructive/10 text-destructive text-xs font-semibold border border-destructive/20">
-                            High Priority
-                          </span>
-                        )}
-                      </div>
-                    );
-                  })()}
-                </div>
-              </div>
-              
-              {/* Quick actions */}
-              <div className="flex flex-col gap-3 md:min-w-[220px]">
-                <Button 
-                  variant="cta" 
-                  size="lg"
-                  className="h-14 rounded-xl font-semibold shadow-lg hover:shadow-xl transition-all duration-300 bg-gradient-to-r from-cta to-cta/90 hover:from-cta/90 hover:to-cta/80"
-                  onClick={() => {
-                    if (discrepancies.length > 0) {
-                      scrollToDiscrepancies();
-                    }
-                  }}
-                >
-                  <Target className="h-5 w-5 mr-2" />
-                  View Discrepancies
-                </Button>
-                <Button 
-                  variant="secondary" 
-                  size="lg"
-                  className="h-14 rounded-xl font-semibold border border-border/50"
-                  onClick={() => handleExport("report")}
-                >
-                  <Download className="h-5 w-5 mr-2" />
-                  Export Report
-                </Button>
-              </div>
+        {/* 🎯 HERO METRIC: Recoverable Revenue - The Star of the Show */}         
+        <section
+          className={`
+            relative rounded-3xl p-8 md:p-12 overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-700
+            ${isNoLeakage 
+              ? "border-2 border-success/30 bg-gradient-to-br from-success/10 via-success/5 to-card/90" 
+              : "border-2 border-primary/30 bg-gradient-to-br from-primary/10 via-primary/5 to-card/90"}
+          `}
+        >
+
+          {/* ICON */}
+          <div className="absolute -top-12 -right-12 w-48 h-48 rounded-full bg-primary/20 blur-2xl"></div>
+
+          {/* CARD CONTENT */}
+          <div className="relative z-10 space-y-4">
+            <div className="flex items-center gap-3">
+              <Zap className={`h-7 w-7 ${isNoLeakage ? "text-success" : "text-primary"}`} />
+              <span className="text-muted-foreground">FOUND IN THIS AUDIT</span>
             </div>
-          </section>
-        )}
+
+            <h2 className="text-5xl md:text-6xl lg:text-7xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white to-white/60">
+              {formatCurrency(displayRecoverable, contractCurrency)}
+            </h2>
+
+            <p className="text-xl md:text-2xl text-muted-foreground font-medium">
+              {hasPositiveLeakage ? "Recoverable Revenue" : "No Recoverable Revenue"}
+            </p>
+
+            {/* Subtext Example */}
+            <p className="text-sm text-muted-foreground">
+              {hasPositiveLeakage
+                ? `${discrepancies.length} discrepancies across ${billingSummary.invoice_count ?? 0} invoices`
+                : `No discrepancies in billing`}
+            </p>
+
+            <div className="flex gap-4">
+              <Button onClick={() => navigate(`/discrepancies?job=${jobId}`)} variant="default">
+                View Discrepancies
+              </Button>
+
+              <Button onClick={() => handleExport("report")} variant="secondary">
+                Export Report
+              </Button>
+            </div>
+          </div>
+        </section>
 
         {/* Supporting KPI Cards - Standardized styling */}
         <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
