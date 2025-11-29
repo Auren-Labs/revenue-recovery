@@ -702,8 +702,19 @@ async def run(job, documents: List[Dict]) -> Dict:
         processing_tasks = [_process_single_document_fallback(doc) for doc in documents]
         extracted_docs = list(await asyncio.gather(*processing_tasks))
         
-        total_clauses = 0
-        job.metrics["documents"] = extracted_docs
+        # 🔥 DEDUPLICATE documents by filename before storing in metrics
+        seen_filenames = set()
+        unique_extracted_docs = []
+        for doc in extracted_docs:
+            filename = doc.get("filename", "")
+            if filename and filename not in seen_filenames:
+                unique_extracted_docs.append(doc)
+                seen_filenames.add(filename)
+            elif not filename:
+                unique_extracted_docs.append(doc)
+        
+        total_clauses = sum(doc.get("totals", {}).get("clause_hits", 0) for doc in unique_extracted_docs)
+        job.metrics["documents"] = unique_extracted_docs
         job.metrics["total_clauses"] = total_clauses
         job.metrics["extraction_method"] = "gpt4o_fallback"
         await rag_store.index_contracts(job, extracted_docs)
@@ -730,8 +741,21 @@ async def run(job, documents: List[Dict]) -> Dict:
         processing_tasks = [_process_single_document(doc) for doc in documents]
         extracted_docs = list(await asyncio.gather(*processing_tasks))
 
-    total_clauses = sum(doc.get("totals", {}).get("clause_hits", 0) for doc in extracted_docs)
-    job.metrics["documents"] = extracted_docs
+    # 🔥 DEDUPLICATE documents by filename before storing in metrics
+    # (same file might appear with different storage paths - local vs supabase)
+    seen_filenames = set()
+    unique_extracted_docs = []
+    for doc in extracted_docs:
+        filename = doc.get("filename", "")
+        if filename and filename not in seen_filenames:
+            unique_extracted_docs.append(doc)
+            seen_filenames.add(filename)
+        elif not filename:
+            # Include docs without filename (shouldn't happen, but be safe)
+            unique_extracted_docs.append(doc)
+    
+    total_clauses = sum(doc.get("totals", {}).get("clause_hits", 0) for doc in unique_extracted_docs)
+    job.metrics["documents"] = unique_extracted_docs
     job.metrics["total_clauses"] = total_clauses
     job.metrics["ocr_engine"] = "azure_document_intelligence"
     job.metrics["azure_model_id"] = settings.azure_afr_contract_model_id

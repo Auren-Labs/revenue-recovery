@@ -1,6 +1,6 @@
-from . import upload, analysis
+from . import upload, analysis, feedback
 
-__all__ = ["upload", "analysis"]
+__all__ = ["upload", "analysis", "feedback"]
 
 
 

@@ -20,9 +20,12 @@ import {
   X,
   RefreshCw,
   Loader2,
+  CheckSquare,
+  Square,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
   SelectContent,
@@ -71,6 +74,11 @@ export default function AuditHistory() {
   const [auditToDelete, setAuditToDelete] = useState<AuditJob | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [retrying, setRetrying] = useState<string | null>(null);
+  
+  // Bulk selection state
+  const [selectedAudits, setSelectedAudits] = useState<Set<string>>(new Set());
+  const [bulkDeleteDialogOpen, setBulkDeleteDialogOpen] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   
   // Search and filter state
   const [searchQuery, setSearchQuery] = useState("");
@@ -143,6 +151,7 @@ export default function AuditHistory() {
 
       // Remove from local state
       setAudits(audits.filter((a) => a.id !== auditToDelete.id));
+      setAllAudits(allAudits.filter((a) => a.id !== auditToDelete.id));
       setDeleteDialogOpen(false);
       setAuditToDelete(null);
     } catch (err: any) {
@@ -150,6 +159,78 @@ export default function AuditHistory() {
       setDeleteDialogOpen(false);
     } finally {
       setDeleting(false);
+    }
+  };
+
+  // Bulk selection handlers
+  const handleSelectAudit = (auditId: string, checked: boolean) => {
+    setSelectedAudits((prev) => {
+      const newSet = new Set(prev);
+      if (checked) {
+        newSet.add(auditId);
+      } else {
+        newSet.delete(auditId);
+      }
+      return newSet;
+    });
+  };
+
+  const handleSelectAll = (checked: boolean) => {
+    if (checked) {
+      setSelectedAudits(new Set(audits.map((a) => a.id)));
+    } else {
+      setSelectedAudits(new Set());
+    }
+  };
+
+  const handleBulkDeleteClick = () => {
+    if (selectedAudits.size === 0) return;
+    setBulkDeleteDialogOpen(true);
+  };
+
+  const handleBulkDeleteConfirm = async () => {
+    if (selectedAudits.size === 0) return;
+
+    try {
+      setBulkDeleting(true);
+      const auditIds = Array.from(selectedAudits);
+      
+      // Delete all selected audits in parallel
+      const deletePromises = auditIds.map((id) =>
+        fetch(`${API_BASE}/upload/${id}`, {
+          method: "DELETE",
+          headers: {
+            ...getAuthHeader(),
+            "Content-Type": "application/json",
+          },
+        })
+      );
+
+      const results = await Promise.allSettled(deletePromises);
+      
+      // Check for failures
+      const failures = results.filter((r) => r.status === "rejected" || (r.status === "fulfilled" && !r.value.ok));
+      if (failures.length > 0) {
+        throw new Error(`Failed to delete ${failures.length} audit(s)`);
+      }
+
+      // Remove from local state
+      const deletedIds = Array.from(selectedAudits);
+      setAudits(audits.filter((a) => !selectedAudits.has(a.id)));
+      setAllAudits(allAudits.filter((a) => !selectedAudits.has(a.id)));
+      setSelectedAudits(new Set());
+      setBulkDeleteDialogOpen(false);
+      
+      // Show success message
+      if (deletedIds.length > 0) {
+        // Optionally show a toast notification here
+        console.log(`Successfully deleted ${deletedIds.length} audit(s)`);
+      }
+    } catch (err: any) {
+      setError(err.message || "Failed to delete audits");
+      setBulkDeleteDialogOpen(false);
+    } finally {
+      setBulkDeleting(false);
     }
   };
 
@@ -405,24 +486,53 @@ export default function AuditHistory() {
             </Select>
           </div>
 
-          {/* Results count */}
-          {(searchQuery || statusFilter !== "all") && (
-            <div className="mt-4 text-sm text-muted-foreground">
-              Showing {audits.length} of {allAudits.length} audits
-              <Button
-                variant="ghost"
-                size="sm"
-                className="ml-2 h-auto p-0 text-primary"
-                onClick={() => {
-                  setSearchQuery("");
-                  setStatusFilter("all");
-                  setSortBy("newest");
-                }}
-              >
-                Clear filters
-              </Button>
+          {/* Results count and bulk actions */}
+          <div className="mt-4 flex items-center justify-between">
+            <div className="text-sm text-muted-foreground">
+              {(searchQuery || statusFilter !== "all") && (
+                <>
+                  Showing {audits.length} of {allAudits.length} audits
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="ml-2 h-auto p-0 text-primary"
+                    onClick={() => {
+                      setSearchQuery("");
+                      setStatusFilter("all");
+                      setSortBy("newest");
+                    }}
+                  >
+                    Clear filters
+                  </Button>
+                </>
+              )}
             </div>
-          )}
+            
+            {/* Bulk actions */}
+            {selectedAudits.size > 0 && (
+              <div className="flex items-center gap-3">
+                <span className="text-sm text-muted-foreground">
+                  {selectedAudits.size} {selectedAudits.size === 1 ? "audit" : "audits"} selected
+                </span>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={handleBulkDeleteClick}
+                  className="gap-2"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Delete Selected
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setSelectedAudits(new Set())}
+                >
+                  Clear Selection
+                </Button>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Audit List */}
@@ -439,14 +549,47 @@ export default function AuditHistory() {
           </div>
         ) : (
           <div className="space-y-4">
+            {/* Select All Checkbox */}
+            {audits.length > 0 && (
+              <div className="bg-card rounded-lg border border-border p-4 flex items-center gap-3">
+                <Checkbox
+                  checked={audits.length > 0 && audits.every((a) => selectedAudits.has(a.id))}
+                  onCheckedChange={(checked) => handleSelectAll(checked as boolean)}
+                  className="h-5 w-5"
+                />
+                <span className="text-sm font-medium text-foreground">
+                  Select All ({audits.length} {audits.length === 1 ? "audit" : "audits"})
+                </span>
+                {selectedAudits.size > 0 && (
+                  <span className="text-xs text-muted-foreground ml-auto">
+                    {selectedAudits.size} selected
+                  </span>
+                )}
+              </div>
+            )}
+
             {audits.map((audit) => (
               <div
                 key={audit.id}
-                className="bg-card rounded-lg border border-border p-6 hover:shadow-lg transition-shadow cursor-pointer"
-                onClick={() => navigate(`/dashboard?job=${audit.id}`)}
+                className={`bg-card rounded-lg border p-6 hover:shadow-lg transition-shadow ${
+                  selectedAudits.has(audit.id) ? "border-primary shadow-md" : "border-border"
+                }`}
               >
-                <div className="flex items-start justify-between">
-                  <div className="flex-1">
+                <div className="flex items-start justify-between gap-4">
+                  {/* Checkbox */}
+                  <div className="pt-1">
+                    <Checkbox
+                      checked={selectedAudits.has(audit.id)}
+                      onCheckedChange={(checked) => handleSelectAudit(audit.id, checked as boolean)}
+                      onClick={(e) => e.stopPropagation()}
+                      className="h-5 w-5"
+                    />
+                  </div>
+
+                  <div 
+                    className="flex-1 cursor-pointer"
+                    onClick={() => navigate(`/dashboard?job=${audit.id}`)}
+                  >
                     <div className="flex items-center gap-3 mb-3">
                       {getStatusIcon(audit.status)}
                       <h3 className="text-xl font-semibold text-foreground">
@@ -615,7 +758,7 @@ export default function AuditHistory() {
         )}
       </div>
 
-      {/* Delete Confirmation Dialog */}
+      {/* Single Delete Confirmation Dialog */}
       <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <DialogContent>
           <DialogHeader>
@@ -644,6 +787,37 @@ export default function AuditHistory() {
               disabled={deleting}
             >
               {deleting ? "Deleting..." : "Delete"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Bulk Delete Confirmation Dialog */}
+      <Dialog open={bulkDeleteDialogOpen} onOpenChange={setBulkDeleteDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete {selectedAudits.size} Audit{selectedAudits.size !== 1 ? "s" : ""}</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete <strong>{selectedAudits.size}</strong> selected audit{selectedAudits.size !== 1 ? "s" : ""}? 
+              This action cannot be undone. All associated data, including discrepancies and metrics, will be permanently deleted.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setBulkDeleteDialogOpen(false);
+              }}
+              disabled={bulkDeleting}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleBulkDeleteConfirm}
+              disabled={bulkDeleting}
+            >
+              {bulkDeleting ? "Deleting..." : `Delete ${selectedAudits.size} Audit${selectedAudits.size !== 1 ? "s" : ""}`}
             </Button>
           </DialogFooter>
         </DialogContent>

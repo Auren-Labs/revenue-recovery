@@ -8,6 +8,8 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { ConfidenceBreakdown } from "@/components/ConfidenceBreakdown";
+import { FindingStatusBadge } from "@/components/FindingStatusBadge";
 
 type InvoiceBreakdown = {
   month: string;
@@ -41,6 +43,32 @@ type Discrepancy = {
   priority?: string;
   invoice_date?: string;
   confidence?: number;
+  confidence_breakdown?: {
+    overall?: number;
+    overall_weighted?: number;
+    overall_geometric?: number;
+    components?: {
+      classification?: { score: number; weight: number; reason: string };
+      date_parsing?: { score: number; weight: number; reason: string };
+      amount_match?: { score: number; weight: number; reason: string };
+      contract_extraction?: { score: number; weight: number; reason: string };
+      validation?: { score: number; weight: number; reason: string };
+    };
+    additional_factors?: Array<{
+      name: string;
+      score: number;
+      weight: number;
+      reason: string;
+      details?: string;
+    }>;
+    weakest_component?: {
+      name: string;
+      score: number;
+      reason: string;
+    };
+    explanation?: string;
+  };
+  finding_status?: string;
   invoice_reference?: string;
   description?: string;
   evidence?: Array<{
@@ -350,9 +378,16 @@ export function PricingTimeline({
                                                     </p>
                                                   )}
                                                   {invoice.discrepancy.confidence && (
-                                                    <p className="text-muted-foreground">
-                                                      • AI confidence: {Math.round(invoice.discrepancy.confidence * 100)}%
-                                                    </p>
+                                                    <div className="flex items-center gap-2 mt-1">
+                                                      <ConfidenceBreakdown
+                                                        breakdown={invoice.discrepancy.confidence_breakdown}
+                                                        overallConfidence={invoice.discrepancy.confidence}
+                                                        compact={true}
+                                                      />
+                                                      {invoice.discrepancy.finding_status && (
+                                                        <FindingStatusBadge status={invoice.discrepancy.finding_status} />
+                                                      )}
+                                                    </div>
                                                   )}
                                                   {stat.discrepancies && stat.discrepancies.length > 1 && (
                                                     <p className="text-muted-foreground">
@@ -383,9 +418,14 @@ export function PricingTimeline({
                                             </Badge>
                                             {/* 🔥 Enhancement 1: Confidence Score */}
                                             {invoice.confidence && (
-                                              <Badge variant="outline" className="text-xs">
-                                                {Math.round(invoice.confidence * 100)}% confident
-                                              </Badge>
+                                              <ConfidenceBreakdown
+                                                breakdown={invoice.discrepancy?.confidence_breakdown}
+                                                overallConfidence={invoice.confidence}
+                                                compact={true}
+                                              />
+                                            )}
+                                            {invoice.discrepancy?.finding_status && (
+                                              <FindingStatusBadge status={invoice.discrepancy.finding_status} />
                                             )}
                                           </>
                                         ) : (

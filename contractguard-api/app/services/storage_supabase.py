@@ -48,23 +48,50 @@ _supabase_client: Client | None = None
 
 
 def get_client() -> Client | None:
+    """Get Supabase client, creating it if needed. Non-blocking with error handling."""
     global _supabase_client
-    if _supabase_client or not settings.supabase_url or not settings.supabase_service_key:
+    if _supabase_client:
         return _supabase_client
-    _supabase_client = create_client(settings.supabase_url, settings.supabase_service_key)
-    return _supabase_client
+    
+    if not settings.supabase_url or not settings.supabase_service_key:
+        logger.debug("Supabase not configured (missing URL or service key)")
+        return None
+    
+    try:
+        # Create client with timeout protection
+        logger.debug("Initializing Supabase client...")
+        _supabase_client = create_client(settings.supabase_url, settings.supabase_service_key)
+        logger.debug("Supabase client initialized successfully")
+        return _supabase_client
+    except Exception as e:
+        logger.error(f"Failed to initialize Supabase client: {e}")
+        # Don't cache failed client
+        _supabase_client = None
+        return None
 
 
 async def _upload_single_file(client: Client, bucket: str, filename: str, data: bytes, prefix: str) -> str:
     """Upload a single file to Supabase Storage."""
     path = f"{prefix}/{uuid4()}-{filename}"
-    await asyncio.to_thread(
-        client.storage.from_(bucket).upload,
-        path,
-        data,
-        {"contentType": "application/octet-stream"},
-    )
-    return path
+    try:
+        # Add timeout to prevent hanging
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                client.storage.from_(bucket).upload,
+                path,
+                data,
+                {"contentType": "application/octet-stream"},
+            ),
+            timeout=60.0  # 60 second timeout per file
+        )
+        logger.info(f"Successfully uploaded {filename} to {path}")
+        return path
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout uploading {filename} to Supabase Storage")
+        raise Exception(f"Upload timeout for {filename}")
+    except Exception as e:
+        logger.error(f"Failed to upload {filename} to Supabase Storage: {e}")
+        raise
 
 async def _store_local_fallback(files: List[tuple[str, bytes]], prefix: str) -> List[str]:
     """Store files locally when Supabase is not available."""
@@ -87,18 +114,47 @@ async def upload_files(files: List[tuple[str, bytes]], prefix: str) -> List[str]
     :param prefix: folder path within the bucket
     :return: list of public paths
     """
-    client = get_client()
+    # Get client in async-safe way
+    try:
+        client = await asyncio.to_thread(get_client)
+    except Exception as e:
+        logger.error(f"Failed to get Supabase client: {e}")
+        client = None
+    
     bucket = settings.supabase_storage_bucket
     if not client or not bucket:
+        logger.warning("Supabase client or bucket not configured, using local fallback")
         return await _store_local_fallback(files, prefix)
 
-    # Upload all files in parallel
+    logger.info(f"Uploading {len(files)} file(s) to Supabase Storage bucket '{bucket}' with prefix '{prefix}'")
+    
+    # Upload all files in parallel with error handling
     upload_tasks = [
         _upload_single_file(client, bucket, filename, data, prefix)
         for filename, data in files
     ]
-    stored_paths = await asyncio.gather(*upload_tasks)
-    return list(stored_paths)
+    
+    try:
+        stored_paths = await asyncio.gather(*upload_tasks, return_exceptions=True)
+        
+        # Check for exceptions
+        results = []
+        for idx, result in enumerate(stored_paths):
+            if isinstance(result, Exception):
+                logger.error(f"Upload failed for {files[idx][0]}: {result}")
+                # Fallback to local storage for failed uploads
+                local_paths = await _store_local_fallback([files[idx]], prefix)
+                results.append(local_paths[0] if local_paths else f"failed-{files[idx][0]}")
+            else:
+                results.append(result)
+        
+        logger.info(f"Successfully uploaded {len([r for r in results if not r.startswith('failed-')])}/{len(files)} files")
+        return results
+    except Exception as e:
+        logger.error(f"Critical error during file upload: {e}", exc_info=True)
+        # Fallback to local storage
+        logger.warning("Falling back to local storage due to upload errors")
+        return await _store_local_fallback(files, prefix)
 
 
 async def download_file(storage_path: str) -> bytes | None:

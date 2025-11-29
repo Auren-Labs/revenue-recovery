@@ -132,14 +132,19 @@ All colors MUST be HSL.
 @layer utilities {
   @keyframes shimmer {
     0% {
-      transform: translateX(-100%);
+      background-position: -200% 0;
     }
     100% {
-      transform: translateX(100%);
+      background-position: 200% 0;
     }
   }
 
+  .bg-gradient-radial {
+    background: radial-gradient(circle, var(--tw-gradient-stops));
+  }
+  
   .animate-shimmer {
-    animation: shimmer 2s infinite;
+    animation: shimmer 3s ease-in-out infinite;
+    background-size: 200% 100%;
   }
 }

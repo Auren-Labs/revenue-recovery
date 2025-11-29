@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime
-from fastapi.concurrency import run_in_threadpool
 
 from app.models import Job
 from app.services import document_extraction, llm_extraction, reconciliation, job_repository
@@ -43,33 +42,75 @@ def get_job(job_id: str, organization_id: str | None = None) -> Job | None:
 
 
 def attach_contracts(job: Job, documents: list[dict]) -> None:
-    job.contracts.extend(documents)
+    # Deduplicate by filename before adding
+    existing_filenames = {doc.get("filename") for doc in job.contracts if doc.get("filename")}
+    new_docs = [doc for doc in documents if doc.get("filename") not in existing_filenames]
+    
+    if new_docs:
+        job.contracts.extend(new_docs)
+    
+    # Update or add to contract_files in metrics (deduplicate by filename)
     stored = job.metrics.setdefault("contract_files", [])
-    stored.extend(
-        {
-            "filename": doc.get("filename"),
-            "storage": doc.get("storage"),
-            "storage_path": doc.get("storage_path"),
-            "local_path": doc.get("local_path"),
-        }
-        for doc in documents
-    )
+    
+    for doc in documents:
+        filename = doc.get("filename")
+        if not filename:
+            continue
+        # Find existing entry or create new one
+        existing = next((f for f in stored if f.get("filename") == filename), None)
+        if existing:
+            # Update existing entry (prefer supabase if available)
+            if doc.get("storage") == "supabase" and doc.get("storage_path"):
+                existing["storage"] = "supabase"
+                existing["storage_path"] = doc.get("storage_path")
+            if doc.get("local_path") and not existing.get("local_path"):
+                existing["local_path"] = doc.get("local_path")
+        else:
+            # Add new entry
+            stored.append({
+                "filename": filename,
+                "storage": doc.get("storage"),
+                "storage_path": doc.get("storage_path"),
+                "local_path": doc.get("local_path"),
+            })
+    
     job_repository.replace_contract_files(job.id, job.contracts)
     job_repository.save_metrics(job.id, job.metrics)
 
 
 def attach_billing(job: Job, documents: list[dict]) -> None:
-    job.billing_records.extend(documents)
+    # Deduplicate by filename before adding
+    existing_filenames = {doc.get("filename") for doc in job.billing_records if doc.get("filename")}
+    new_docs = [doc for doc in documents if doc.get("filename") not in existing_filenames]
+    
+    if new_docs:
+        job.billing_records.extend(new_docs)
+    
+    # Update or add to billing_files in metrics (deduplicate by filename)
     stored = job.metrics.setdefault("billing_files", [])
-    stored.extend(
-        {
-            "filename": doc.get("filename"),
-            "storage": doc.get("storage"),
-            "storage_path": doc.get("storage_path"),
-            "local_path": doc.get("local_path"),
-        }
-        for doc in documents
-    )
+    
+    for doc in documents:
+        filename = doc.get("filename")
+        if not filename:
+            continue
+        # Find existing entry or create new one
+        existing = next((f for f in stored if f.get("filename") == filename), None)
+        if existing:
+            # Update existing entry (prefer supabase if available)
+            if doc.get("storage") == "supabase" and doc.get("storage_path"):
+                existing["storage"] = "supabase"
+                existing["storage_path"] = doc.get("storage_path")
+            if doc.get("local_path") and not existing.get("local_path"):
+                existing["local_path"] = doc.get("local_path")
+        else:
+            # Add new entry
+            stored.append({
+                "filename": filename,
+                "storage": doc.get("storage"),
+                "storage_path": doc.get("storage_path"),
+                "local_path": doc.get("local_path"),
+            })
+    
     job_repository.replace_billing_files(job.id, job.billing_records)
     job_repository.save_metrics(job.id, job.metrics)
 
@@ -206,43 +247,94 @@ def enqueue_job(job_id: str) -> None:
             logger.error("Failed to enqueue job %s to Celery: %s", job_id, e, exc_info=True)
             # Fallback to async thread
             logger.warning("Falling back to async thread processing for job %s", job_id)
-            asyncio.create_task(run_pipeline_async(job_id))
+            _start_async_pipeline(job_id)
     else:
         # Fallback: run in background thread (not recommended for production)
         logger.warning("Celery not available, using async thread fallback for job %s", job_id)
-        asyncio.create_task(run_pipeline_async(job_id))
+        _start_async_pipeline(job_id)
+
+
+def _start_async_pipeline(job_id: str) -> None:
+    """Start the async pipeline in a background task."""
+    import threading
+    
+    def run_in_thread():
+        """Run the async pipeline in a new event loop."""
+        try:
+            logger.info("Starting async pipeline for job %s in background thread", job_id)
+            asyncio.run(run_pipeline_async(job_id))
+            logger.info("Async pipeline completed for job %s", job_id)
+        except Exception as e:
+            logger.error("Error in async pipeline for job %s: %s", job_id, e, exc_info=True)
+            # Try to update job status to failed
+            try:
+                job = get_job(job_id)
+                if job:
+                    set_job_status(job, "failed", f"Pipeline error: {str(e)}")
+            except Exception as update_error:
+                logger.error("Failed to update job status after error: %s", update_error)
+    
+    # Always start in a background thread to avoid event loop conflicts
+    thread = threading.Thread(target=run_in_thread, daemon=False, name=f"pipeline-{job_id}")
+    thread.start()
+    logger.info("Started async pipeline in background thread for job %s (thread: %s)", job_id, thread.name)
 
 
 async def run_pipeline_async(job_id: str):
-    await run_in_threadpool(run_pipeline_sync, job_id)
-
-
-def run_pipeline_sync(job_id: str):
-    job = get_job(job_id)
-    if not job:
-        return
+    """Run the audit pipeline asynchronously."""
+    logger.info("=== Starting pipeline for job %s ===", job_id)
     try:
+        job = get_job(job_id)
+        if not job:
+            logger.error("Job %s not found", job_id)
+            return
+        
+        logger.info("Job %s loaded: vendor=%s, contracts=%d, billing=%d", 
+                   job_id, job.vendor_name, len(job.contracts), len(job.billing_records))
+        
+        # Set status to in_progress immediately
         set_job_status(job, "in_progress")
+        logger.info("Job %s status set to in_progress", job_id)
         update_progress(job_id, 5, "Starting audit pipeline...")
         update_stage(job, "upload", "completed", "Files stored and ready.")
 
         update_stage(job, "document_extraction", "in_progress")
         update_progress(job_id, 15, "Extracting contract clauses and terms...")
-        extraction = asyncio.run(document_extraction.run(job, job.contracts))
+        logger.info(f"Starting document extraction for job {job_id}")
+        
+        # 🔥 DEDUPLICATE contracts by filename before extraction
+        # (same file might appear with different storage paths - local vs supabase)
+        seen_contract_filenames = set()
+        unique_contracts = []
+        for contract in job.contracts:
+            filename = contract.get("filename", "")
+            if filename and filename not in seen_contract_filenames:
+                unique_contracts.append(contract)
+                seen_contract_filenames.add(filename)
+            elif not filename:
+                unique_contracts.append(contract)  # Include contracts without filename
+        
+        logger.info(f"Processing {len(unique_contracts)} unique contract(s) (deduplicated from {len(job.contracts)})")
+        extraction = await document_extraction.run(job, unique_contracts)
+        logger.info(f"Document extraction complete for job {job_id}: {extraction.get('clauses', 0)} clauses")
         update_stage(job, "document_extraction", "completed")
         update_progress(job_id, 40, f"Extracted {extraction.get('clauses', 0)} clauses from {len(extraction.get('documents', []))} documents")
         job_repository.save_metrics(job.id, job.metrics)
 
         update_stage(job, "llm_extraction", "in_progress")
         update_progress(job_id, 50, "Analyzing contract terms with AI...")
-        llm_output = asyncio.run(llm_extraction.analyze(job, extraction["documents"]))
+        logger.info(f"Starting LLM extraction for job {job_id}")
+        llm_output = await llm_extraction.analyze(job, extraction["documents"])
+        logger.info(f"LLM extraction complete for job {job_id}")
         update_stage(job, "llm_extraction", "completed")
         update_progress(job_id, 70, "Contract analysis complete")
         job_repository.save_metrics(job.id, job.metrics)
 
         update_stage(job, "reconciliation", "in_progress")
         update_progress(job_id, 75, "Reconciling billing data with contract terms...")
-        asyncio.run(reconciliation.run(job, llm_output))
+        logger.info(f"Starting reconciliation for job {job_id}")
+        await reconciliation.run(job, llm_output)
+        logger.info(f"Reconciliation complete for job {job_id}")
         update_stage(job, "reconciliation", "completed")
         update_progress(job_id, 95, "Reconciliation complete, finalizing results...")
         job_repository.save_metrics(job.id, job.metrics)
@@ -250,14 +342,32 @@ def run_pipeline_sync(job_id: str):
 
         update_progress(job_id, 100, "Audit complete!")
         set_job_status(job, "completed", "Analysis finished.")
+        logger.info(f"Job {job_id} completed successfully")
         
         # Send email notification
         _send_completion_email(job)
     except Exception as exc:
+        logger.error(f"Job {job_id} failed: {exc}", exc_info=True)
         update_progress(job_id, 0, f"Error: {str(exc)}")
         set_job_status(job, "failed", str(exc))
         
         # Send failure email notification
         _send_failure_email(job, str(exc))
+
+
+def run_pipeline_sync(job_id: str):
+    """Synchronous wrapper for Celery compatibility."""
+    # This is only used by Celery workers which run in separate processes
+    # Use asyncio.run() here since we're in a fresh process
+    try:
+        asyncio.run(run_pipeline_async(job_id))
+    except RuntimeError as e:
+        # If there's already an event loop running, use a different approach
+        if "asyncio.run() cannot be called from a running event loop" in str(e):
+            logger.warning(f"Event loop already running for job {job_id}, using create_task")
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(run_pipeline_async(job_id))
+        else:
+            raise
 
 

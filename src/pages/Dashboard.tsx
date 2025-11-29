@@ -57,6 +57,12 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { ConfidenceGauge } from "@/components/ConfidenceGauge";
+import { ConfidenceBreakdown } from "@/components/ConfidenceBreakdown";
+import { FindingStatusBadge } from "@/components/FindingStatusBadge";
+import { DiscrepancyItem } from "@/components/DiscrepancyItem";
+import { ContractChat } from "@/components/ContractChat";
+import { DisputeLetter } from "@/components/DisputeLetter";
+import { AuditTrail } from "@/components/AuditTrail";
 import { ClassificationChart } from "@/components/ClassificationChart";
 import { PerformanceMetrics } from "@/components/PerformanceMetrics";
 import { EmptyState } from "@/components/EmptyState";
@@ -194,6 +200,34 @@ type AnalysisSummary = {
     due?: string;
     invoice_date?: string;
     evidence?: DiscrepancyEvidence[];
+    confidence?: number;
+    confidence_breakdown?: {
+      overall?: number;
+      overall_weighted?: number;
+      overall_geometric?: number;
+      components?: {
+        classification?: { score: number; weight: number; reason: string };
+        date_parsing?: { score: number; weight: number; reason: string };
+        amount_match?: { score: number; weight: number; reason: string };
+        contract_extraction?: { score: number; weight: number; reason: string };
+        validation?: { score: number; weight: number; reason: string };
+      };
+      additional_factors?: Array<{
+        name: string;
+        score: number;
+        weight: number;
+        reason: string;
+        details?: string;
+      }>;
+      weakest_component?: {
+        name: string;
+        score: number;
+        reason: string;
+      };
+      explanation?: string;
+    };
+    finding_status?: string;
+    validation_reason?: string;
   }>;
 };
 
@@ -381,6 +415,13 @@ const Dashboard = () => {
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
   const [selectedCustomer, setSelectedCustomer] = useState<string | null>(null);
+  const [disputeLetterOpen, setDisputeLetterOpen] = useState(false);
+  const [selectedDiscrepancyForDispute, setSelectedDiscrepancyForDispute] = useState<{
+    id: string;
+    discrepancy: any;
+  } | null>(null);
+  const [auditTrailOpen, setAuditTrailOpen] = useState(false);
+  const [selectedDiscrepancyForAudit, setSelectedDiscrepancyForAudit] = useState<any>(null);
 
   useEffect(() => {
     if (!jobId) {
@@ -427,7 +468,21 @@ const Dashboard = () => {
   const llmSummary = metrics.llm_summary as string | undefined;
   const clauseHits = metrics.total_clauses ?? 0;
   const recoverableAmount = metrics.recoverable_amount ?? 0;
-  const documents = (metrics.documents as ExtractedDocument[] | undefined) ?? [];
+  // Deduplicate documents by filename to avoid showing duplicates
+  // (same file might appear with different storage paths - local vs supabase)
+  const allDocuments = (metrics.documents as ExtractedDocument[] | undefined) ?? [];
+  const documents = useMemo(() => {
+    const seen = new Set<string>();
+    return allDocuments.filter((doc) => {
+      // Use filename as the unique key (same file shouldn't appear twice)
+      const key = doc.filename || 'unknown';
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+  }, [allDocuments]);
   const billingFiles = (metrics.billing_files as BillingFile[] | undefined) ?? [];
   const billingSources = billingSummary.sources ?? [];
   const viewerUrl =
@@ -1010,7 +1065,7 @@ const chartFriendlyLabel = {
           </div>
         </div>
 
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12 space-y-10">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 md:py-12 space-y-8 md:space-y-12">
         {error && (
           <div className="rounded-2xl border border-destructive/20 bg-destructive/10 text-destructive px-4 py-3 text-sm">
             {error}
@@ -1021,11 +1076,13 @@ const chartFriendlyLabel = {
             Upload a contract + billing run to see live metrics here. Showing sample data until a job is provided.
           </div>
         )}
-        <header className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-          <div>
-            <p className="text-sm font-semibold uppercase tracking-[0.3em] text-primary">Operations cockpit</p>
-            <h1 className="text-4xl font-bold text-primary mt-2">ContractGuard Dashboard</h1>
-            <p className="text-muted-foreground mt-3 max-w-2xl">
+        <header className="flex flex-col gap-6 md:flex-row md:items-center md:justify-between pb-4">
+          <div className="space-y-2">
+            <p className="text-sm font-semibold uppercase tracking-[0.3em] text-primary/80">Operations cockpit</p>
+            <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-foreground via-foreground/95 to-foreground/80 bg-clip-text text-transparent">
+              ContractGuard Dashboard
+            </h1>
+            <p className="text-muted-foreground max-w-2xl leading-relaxed">
               Monitor automated audits, review AI insights, and dispatch revenue recovery workstreams—all in one place.
             </p>
           </div>
@@ -1074,24 +1131,101 @@ const chartFriendlyLabel = {
           </div>
         </header>
 
-        {/* 🔥 ENHANCED: Improved metric cards */}
-        <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-          {highlightCards.map((metric, index) => {
+        {/* 🎯 HERO METRIC: Recoverable Revenue - The Star of the Show */}
+        {recoverableAmount > 0 && (
+          <section className="relative rounded-3xl border-2 border-primary/30 bg-gradient-to-br from-primary/10 via-primary/5 to-card/90 backdrop-blur-xl p-8 md:p-12 shadow-2xl shadow-primary/10 overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-700">
+            {/* Subtle background effects */}
+            <div className="absolute inset-0 bg-gradient-radial from-primary/5 via-transparent to-transparent opacity-50" />
+            <div className="absolute top-0 right-0 w-64 h-64 bg-primary/5 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2" />
+            
+            <div className="relative z-10 flex flex-col md:flex-row md:items-center md:justify-between gap-8">
+              <div className="flex-1 space-y-4">
+                <div className="flex items-center gap-3">
+                  <div className="h-14 w-14 rounded-2xl bg-gradient-to-br from-primary/30 to-primary/10 border-2 border-primary/40 flex items-center justify-center shadow-lg">
+                    <Zap className="h-7 w-7 text-primary" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-semibold uppercase tracking-wider text-primary/80 mb-1">
+                      Found in this audit
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {discrepancies.length} {discrepancies.length === 1 ? 'discrepancy' : 'discrepancies'} across {billingSummary.invoice_count ?? 0} invoices
+                    </p>
+                  </div>
+                </div>
+                <div className="space-y-3">
+                  <h2 className="text-5xl md:text-6xl lg:text-7xl font-bold bg-gradient-to-r from-foreground via-foreground/95 to-foreground/80 bg-clip-text text-transparent leading-tight">
+                    {formatCurrency(recoverableAmount, contractCurrency)}
+                  </h2>
+                  <p className="text-xl md:text-2xl text-muted-foreground font-medium">
+                    Recoverable Revenue
+                  </p>
+                  {(() => {
+                    const totalBilled = billingSummary.total_billed || 1;
+                    const leakagePercentage = (recoverableAmount / totalBilled) * 100;
+                    return (
+                      <div className="flex items-center gap-3 pt-2">
+                        <span className="text-sm text-muted-foreground">
+                          {leakagePercentage.toFixed(1)}% of total billed
+                        </span>
+                        {leakagePercentage > 5 && (
+                          <span className="px-3 py-1.5 rounded-full bg-destructive/10 text-destructive text-xs font-semibold border border-destructive/20">
+                            High Priority
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
+              
+              {/* Quick actions */}
+              <div className="flex flex-col gap-3 md:min-w-[220px]">
+                <Button 
+                  variant="cta" 
+                  size="lg"
+                  className="h-14 rounded-xl font-semibold shadow-lg hover:shadow-xl transition-all duration-300 bg-gradient-to-r from-cta to-cta/90 hover:from-cta/90 hover:to-cta/80"
+                  onClick={() => {
+                    if (discrepancies.length > 0) {
+                      scrollToDiscrepancies();
+                    }
+                  }}
+                >
+                  <Target className="h-5 w-5 mr-2" />
+                  View Discrepancies
+                </Button>
+                <Button 
+                  variant="secondary" 
+                  size="lg"
+                  className="h-14 rounded-xl font-semibold border border-border/50"
+                  onClick={() => handleExport("report")}
+                >
+                  <Download className="h-5 w-5 mr-2" />
+                  Export Report
+                </Button>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {/* Supporting KPI Cards - Standardized styling */}
+        <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {highlightCards.filter(card => card.label !== "Recoverable revenue").map((metric, index) => {
             const hasIssues = metric.priority === "critical" && discrepancies.length > 0;
-            const isActionable = metric.actionable;
+            const isActionable = (metric as any).actionable;
             
             return (
               <div
                 key={metric.label}
-                className={`rounded-2xl border p-5 shadow-card space-y-3 transition-all duration-200 relative overflow-hidden group ${
+                className={`rounded-2xl border border-border/50 bg-card/90 backdrop-blur-sm p-6 shadow-sm space-y-4 transition-all duration-300 relative overflow-hidden group animate-in fade-in slide-in-from-bottom-4 ${
                   hasIssues 
-                    ? 'border-destructive/30 hover:border-destructive/60' 
-                    : 'border-border hover:border-primary/40'
+                    ? 'border-destructive/30 bg-gradient-to-br from-destructive/5 to-card/90 hover:border-destructive/50 hover:shadow-md' 
+                    : 'hover:border-primary/30 hover:shadow-md'
                 } ${
-                  isActionable ? 'cursor-pointer hover:-translate-y-1 hover:shadow-2xl' : ''
+                  isActionable ? 'cursor-pointer hover:-translate-y-0.5' : ''
                 }`}
                 style={{
-                  backgroundImage: getCardGradient(metric.priority, hasIssues),
+                  animationDelay: `${index * 100}ms`
                 }}
                 onClick={() => {
                   if (metric.label === "Active escalations" && discrepancies.length > 0) {
@@ -1101,55 +1235,46 @@ const chartFriendlyLabel = {
                   }
                 }}
               >
-                {/* 🔥 NEW: Status badge for critical items */}
+                {/* Status badge for critical items */}
                 {hasIssues && (
-                  <div className="absolute top-3 right-3">
-                    <span className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider rounded-full bg-destructive text-destructive-foreground animate-pulse">
+                  <div className="absolute top-4 right-4 z-10">
+                    <span className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider rounded-full bg-destructive/20 text-destructive border border-destructive/30 animate-pulse">
                       Critical
                     </span>
                   </div>
                 )}
                 
                 <div className="flex items-start justify-between">
-                  <div className="flex-1">
-                    <p className="text-xs uppercase tracking-[0.3em] text-muted-foreground/80">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground/70 font-semibold mb-3">
                       {metric.label}
                     </p>
-                    <p className="text-3xl font-bold text-foreground mt-2">{metric.value}</p>
+                    <p className="text-2xl font-bold text-foreground">{metric.value}</p>
                   </div>
-                  <div className={`h-10 w-10 rounded-xl flex items-center justify-center shadow-inner ${
-                    hasIssues ? 'bg-destructive/20 text-destructive' : 'bg-primary/10 text-primary'
+                  <div className={`h-11 w-11 rounded-xl flex items-center justify-center flex-shrink-0 border ${
+                    hasIssues ? 'bg-destructive/15 text-destructive border-destructive/20' : 'bg-primary/10 text-primary border-primary/20'
                   }`}>
                     <metric.icon className="h-5 w-5" />
                   </div>
                 </div>
                 
-                <div className="flex items-center justify-between text-xs">
+                <div className="flex items-center justify-between text-xs pt-3 border-t border-border/30">
                   <span className="text-muted-foreground">{metric.delta}</span>
                   <span className={`font-semibold flex items-center gap-1 ${
-                    hasIssues ? 'text-destructive' : 'text-cta'
+                    hasIssues ? 'text-destructive' : metric.trend.includes('✓') ? 'text-success' : 'text-cta'
                   }`}>
                     {metric.trend.includes('↑') && <TrendingUp className="h-3 w-3" />}
                     {metric.trend.includes('↓') && <TrendingDown className="h-3 w-3" />}
                     {metric.trend}
                   </span>
                 </div>
-                
-                {/* 🔥 NEW: Hover arrow for actionable cards */}
-                {isActionable && (
-                  <div className="absolute inset-0 bg-gradient-to-t from-background/95 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-center pb-4 pointer-events-none">
-                    <ArrowRight className="h-4 w-4 text-primary animate-pulse" />
-                  </div>
-                )}
-                
-                <div className="absolute inset-0 pointer-events-none opacity-20 bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.35),_transparent_65%)]" />
               </div>
             );
           })}
         </section>
 
         <section className="grid gap-6 lg:grid-cols-3">
-          <div className="lg:col-span-2 rounded-3xl border border-border bg-card/90 shadow-hover p-6">
+          <div className="lg:col-span-2 rounded-2xl border border-border/50 bg-card/90 backdrop-blur-sm shadow-sm p-6 hover:shadow-md transition-shadow duration-300">
             <div className="flex items-center justify-between mb-4">
               <div>
                 <p className="text-sm text-muted-foreground">Leakage trend</p>
@@ -1198,7 +1323,7 @@ const chartFriendlyLabel = {
             </div>
           </div>
 
-          <div className="rounded-3xl border border-border bg-card/90 shadow-hover p-6 space-y-5">
+          <div className="rounded-2xl border border-border/50 bg-card/90 backdrop-blur-sm shadow-sm p-6 hover:shadow-md transition-shadow duration-300 space-y-5">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-muted-foreground flex items-center gap-2">
@@ -1264,7 +1389,7 @@ const chartFriendlyLabel = {
 
         {/* 🔥 NEW: Confidence & Classification Insights */}
         <section className="grid gap-6 sm:grid-cols-1 md:grid-cols-2 lg:grid-cols-3">
-          <div className="rounded-3xl border border-border bg-card/90 shadow-hover p-6 space-y-4">
+          <div className="rounded-2xl border border-border/50 bg-card/90 backdrop-blur-sm shadow-sm p-6 hover:shadow-md transition-shadow duration-300 space-y-4">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-muted-foreground flex items-center gap-2">
@@ -1324,7 +1449,7 @@ const chartFriendlyLabel = {
             )}
           </div>
 
-          <div className="rounded-3xl border border-border bg-card/90 shadow-hover p-6 space-y-4">
+          <div className="rounded-2xl border border-border/50 bg-card/90 backdrop-blur-sm shadow-sm p-6 hover:shadow-md transition-shadow duration-300 space-y-4">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-muted-foreground flex items-center gap-2">
@@ -1353,7 +1478,7 @@ const chartFriendlyLabel = {
             )}
           </div>
 
-          <div className="rounded-3xl border border-border bg-card/90 shadow-hover p-6 space-y-4">
+          <div className="rounded-2xl border border-border/50 bg-card/90 backdrop-blur-sm shadow-sm p-6 hover:shadow-md transition-shadow duration-300 space-y-4">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-muted-foreground flex items-center gap-2">
@@ -1382,7 +1507,7 @@ const chartFriendlyLabel = {
 
         {/* 🔥 ADD REF HERE */}
         <section ref={discrepanciesSectionRef} className="grid gap-6 lg:grid-cols-3 md:grid-cols-1">
-          <div className="lg:col-span-2 rounded-3xl border border-border bg-card/90 shadow-hover p-6">
+          <div className="lg:col-span-2 rounded-2xl border border-border/50 bg-card/90 backdrop-blur-sm shadow-sm p-6 hover:shadow-md transition-shadow duration-300">
             <div className="flex items-center justify-between mb-4">
               <div>
                 <p className="text-sm text-muted-foreground">Discrepancies</p>
@@ -1482,26 +1607,48 @@ const chartFriendlyLabel = {
                         </summary>
                         <div className="mt-3 space-y-2 pl-4 border-l border-border">
                           {group.discrepancies.map((disc, idx) => (
-                            <div key={`${group.customer}-${idx}`} className="text-sm flex justify-between items-center py-2 border-b border-border/30 last:border-0">
-                              <div className="flex-1">
-                                <span className="text-muted-foreground">{disc.invoice_date || "N/A"}</span>
-                                {disc.issue && (
-                                  <span className="ml-2 text-xs text-muted-foreground">• {disc.issue}</span>
-                                )}
-                              </div>
-                              <span className="font-mono text-destructive font-semibold">
-                                {formatCurrency(disc.value || 0, contractCurrency)}
-                              </span>
-                            </div>
+                            <DiscrepancyItem
+                              key={`${group.customer}-${idx}`}
+                              discrepancy={disc}
+                              formatCurrency={formatCurrency}
+                              contractCurrency={contractCurrency}
+                              onViewAuditTrail={(disc) => {
+                                setSelectedDiscrepancyForAudit(disc);
+                                setAuditTrailOpen(true);
+                              }}
+                            />
                           ))}
                         </div>
                       </details>
 
-                      {/* Actions */}
-                      <div className="flex gap-2 mt-4">
-                        <Button variant="cta" size="sm" className="gap-2">
+                      {/* Actions - Premium Styling */}
+                      <div className="flex gap-3 mt-6 flex-wrap">
+                        <Button 
+                          variant="cta" 
+                          size="default" 
+                          className="gap-2 h-11 px-6 font-semibold shadow-lg hover:shadow-xl transition-all duration-300 bg-gradient-to-r from-cta to-cta/90 hover:from-cta/90 hover:to-cta/80"
+                          onClick={() => {
+                            // Use first discrepancy for dispute letter
+                            const firstDisc = group.discrepancies[0];
+                            if (firstDisc) {
+                              // Find the index of this discrepancy in the full discrepancies array
+                              const discIndex = discrepancies.findIndex(
+                                (d) => d === firstDisc || 
+                                (d.customer === firstDisc.customer && 
+                                 d.invoice_date === firstDisc.invoice_date &&
+                                 d.issue === firstDisc.issue)
+                              );
+                              const idToUse = discIndex >= 0 ? discIndex.toString() : "0";
+                              setSelectedDiscrepancyForDispute({
+                                id: idToUse,
+                                discrepancy: firstDisc,
+                              });
+                              setDisputeLetterOpen(true);
+                            }
+                          }}
+                        >
                           <Mail className="h-4 w-4" />
-                          Draft Email ({formatCurrency(group.total, contractCurrency)})
+                          Generate Dispute Letter
                         </Button>
                         <Button variant="secondary" size="sm">View Contract</Button>
                         <Button variant="secondary" size="sm">Export Report</Button>
@@ -1513,7 +1660,7 @@ const chartFriendlyLabel = {
             </div>
           </div>
 
-          <div className="rounded-3xl border border-border bg-card/90 shadow-hover p-6 space-y-5">
+          <div className="rounded-2xl border border-border/50 bg-card/90 backdrop-blur-sm shadow-sm p-6 hover:shadow-md transition-shadow duration-300 space-y-5">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-muted-foreground">Latest activity</p>
@@ -1652,7 +1799,7 @@ const chartFriendlyLabel = {
           // Show placeholder or build timeline from available data
           jobId && metrics.gpt4o_rules && (
             <section className="grid gap-6">
-              <div className="rounded-3xl border border-border bg-card/90 shadow-hover p-6">
+              <div className="rounded-2xl border border-border/50 bg-card/90 backdrop-blur-sm shadow-sm p-6 hover:shadow-md transition-shadow duration-300">
                 <h3 className="text-xl font-semibold text-foreground mb-2">Contract Pricing Timeline</h3>
                 <p className="text-sm text-muted-foreground mb-4">
                   Building timeline from available contract data...
@@ -1805,7 +1952,7 @@ const chartFriendlyLabel = {
         )}
 
         <section ref={evidenceSectionRef} className="grid gap-6 lg:grid-cols-2">
-        <div className="rounded-3xl border border-border bg-card/90 shadow-hover p-6 space-y-4">
+        <div className="rounded-2xl border border-border/50 bg-card/90 backdrop-blur-sm shadow-sm p-6 hover:shadow-md transition-shadow duration-300 space-y-4">
           <div className="flex items-center justify-between">
             <div>
               <p className="text-sm text-muted-foreground flex items-center gap-2">
@@ -1947,13 +2094,25 @@ const chartFriendlyLabel = {
               <div className="p-6 space-y-4 bg-secondary/20">
                 {/* Quick actions as cards */}
                 <div className="space-y-3">
-                  <button className="w-full text-left p-3 rounded-lg bg-background/70 border border-border hover:border-primary transition-colors">
+                  <button 
+                    className="w-full text-left p-3 rounded-lg bg-background/70 border border-border hover:border-primary transition-colors"
+                    onClick={() => {
+                      if (primaryDiscrepancy) {
+                        // Use index 0 since primaryDiscrepancy is discrepancies[0]
+                        setSelectedDiscrepancyForDispute({
+                          id: "0",
+                          discrepancy: primaryDiscrepancy,
+                        });
+                        setDisputeLetterOpen(true);
+                      }
+                    }}
+                  >
                     <div className="flex items-center gap-3">
                       <div className="h-10 w-10 rounded-lg bg-destructive/10 flex items-center justify-center">
                         <Mail className="h-5 w-5 text-destructive" />
                       </div>
                       <div>
-                        <p className="font-semibold text-sm">Draft Recovery Email</p>
+                        <p className="font-bold text-base">Generate Dispute Letter</p>
                         <p className="text-xs text-muted-foreground">
                           Request {formatCurrency(recoverableAmount, contractCurrency)} from {primaryDiscrepancy?.customer || "customer"}
                         </p>
@@ -1995,7 +2154,7 @@ const chartFriendlyLabel = {
         </section>
 
         <section className="grid gap-6 lg:grid-cols-2">
-          <div className="rounded-3xl border border-border bg-card/90 shadow-hover p-6 flex items-center gap-6">
+          <div className="rounded-2xl border border-border/50 bg-card/90 backdrop-blur-sm shadow-sm p-6 hover:shadow-md transition-shadow duration-300 flex items-center gap-6">
             <div>
               <p className="text-sm font-semibold uppercase tracking-[0.3em] text-success flex items-center gap-2">
                 ● System Status
@@ -2015,7 +2174,7 @@ const chartFriendlyLabel = {
               </ul>
             </div>
           </div>
-          <div className="rounded-3xl border border-border bg-card/90 shadow-hover p-6 space-y-4">
+          <div className="rounded-2xl border border-border/50 bg-card/90 backdrop-blur-sm shadow-sm p-6 hover:shadow-md transition-shadow duration-300 space-y-4">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-muted-foreground">Team activity</p>
@@ -2042,7 +2201,7 @@ const chartFriendlyLabel = {
         </section>
 
         <section className="grid gap-6 lg:grid-cols-2">
-          <div className="rounded-3xl border border-border bg-card/90 shadow-hover p-6 space-y-4">
+          <div className="rounded-2xl border border-border/50 bg-card/90 backdrop-blur-sm shadow-sm p-6 hover:shadow-md transition-shadow duration-300 space-y-4">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-muted-foreground">Vendor risk assessment</p>
@@ -2162,7 +2321,7 @@ const chartFriendlyLabel = {
               Export scorecard
             </Button>
           </div>
-          <div className="rounded-3xl border border-border bg-card/90 shadow-hover p-6 space-y-4">
+          <div className="rounded-2xl border border-border/50 bg-card/90 backdrop-blur-sm shadow-sm p-6 hover:shadow-md transition-shadow duration-300 space-y-4">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-muted-foreground">Source documents</p>
@@ -2211,7 +2370,7 @@ const chartFriendlyLabel = {
               )}
             </div>
           </div>
-          <div className="rounded-3xl border border-border bg-card/90 shadow-hover p-6 space-y-4">
+          <div className="rounded-2xl border border-border/50 bg-card/90 backdrop-blur-sm shadow-sm p-6 hover:shadow-md transition-shadow duration-300 space-y-4">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-muted-foreground">Billing exports</p>
@@ -2316,73 +2475,24 @@ const chartFriendlyLabel = {
         </DialogContent>
       </Dialog>
 
-      <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-3">
-        {chatOpen && (
-          <div className="w-80 rounded-3xl border border-border bg-card/95 shadow-2xl p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-xs uppercase tracking-[0.3em] text-muted-foreground">AI Copilot</p>
-                <p className="text-sm font-semibold text-foreground">ContractGuard assistant</p>
-              </div>
-              <Button variant="ghost" size="icon" onClick={() => setChatOpen(false)}>
-                ×
-              </Button>
+      {/* Floating AI Copilot Button - Premium & Prominent */}
+      {!chatOpen && jobId && (
+        <div className="fixed bottom-6 right-6 z-50">
+          <Button
+            variant="cta"
+            size="lg"
+            className="h-14 px-6 rounded-full shadow-2xl hover:shadow-primary/30 bg-gradient-to-r from-primary to-primary/90 hover:from-primary/90 hover:to-primary/80 transition-all duration-300 group animate-in fade-in slide-in-from-bottom-4"
+            onClick={() => setChatOpen(true)}
+          >
+            <div className="relative mr-2">
+              <MessageSquare className="h-5 w-5" />
+              <span className="absolute -top-1 -right-1 h-3 w-3 bg-cta rounded-full border-2 border-background animate-pulse" />
             </div>
-            <div className="h-64 overflow-auto space-y-3 pr-1">
-              {chatMessages.map((message) => (
-                <div
-                  key={message.id}
-                  className={`rounded-2xl px-3 py-2 text-sm ${
-                    message.role === "assistant" ? "bg-secondary/40 text-foreground" : "bg-primary/20 text-foreground"
-                  }`}
-                >
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    className="prose prose-invert prose-sm max-w-none leading-relaxed whitespace-pre-wrap"
-                  >
-                    {message.content || (message.streaming ? "…" : "")}
-                  </ReactMarkdown>
-                  {message.streaming && (
-                    <div className="flex items-center gap-2 text-[11px] text-muted-foreground mt-2">
-                      <Loader2 className="h-3 w-3 animate-spin" />
-                      <span>Generating…</span>
-                    </div>
-                  )}
-                  {message.sources && message.sources.length > 0 && (
-                    <div className="mt-2 text-[11px] text-muted-foreground border-t border-border/40 pt-2 space-y-1">
-                      <p className="font-semibold text-foreground/80">References</p>
-                      {message.sources.map((source, sourceIdx) => (
-                        <p key={`${message.id}-source-${sourceIdx}`}>
-                          {source.reference || `Source ${sourceIdx + 1}`} • {source.source_type}
-                        </p>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-            <Textarea
-              value={chatInput}
-              onChange={(e) => setChatInput(e.target.value)}
-              placeholder="Ask about this audit…"
-              className="min-h-[60px]"
-            />
-            <Button
-              variant="cta"
-              className="w-full"
-              disabled={!chatInput.trim() || chatLoading}
-              onClick={handleChatSend}
-            >
-              {chatLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Ask AI"}
-            </Button>
-          </div>
-        )}
-        {!chatOpen && (
-          <Button variant="hero" className="shadow-xl" onClick={() => setChatOpen(true)}>
-            Ask AI Copilot
+            <span className="font-semibold">Ask AI Copilot</span>
+            <Sparkles className="h-4 w-4 ml-2 opacity-70 group-hover:opacity-100 transition-opacity" />
           </Button>
-        )}
-      </div>
+        </div>
+      )}
 
       <Sheet open={!!viewerClause} onOpenChange={(open) => (!open ? closeViewer() : null)}>
         <SheetContent
@@ -2504,6 +2614,112 @@ const chartFriendlyLabel = {
         currency={contractCurrency}
         onClose={() => setSelectedCustomer(null)}
       />
+
+      {/* Dispute Letter Dialog */}
+      {disputeLetterOpen && selectedDiscrepancyForDispute && jobId && (
+        <Dialog open={disputeLetterOpen} onOpenChange={setDisputeLetterOpen}>
+          <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+            <DisputeLetter
+              jobId={jobId}
+              discrepancyId={selectedDiscrepancyForDispute.id}
+              discrepancy={selectedDiscrepancyForDispute.discrepancy}
+              currency={contractCurrency}
+              onClose={() => setDisputeLetterOpen(false)}
+            />
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {/* Audit Trail Dialog */}
+      {auditTrailOpen && selectedDiscrepancyForAudit && (
+        <Dialog open={auditTrailOpen} onOpenChange={setAuditTrailOpen}>
+          <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle>Audit Trail</DialogTitle>
+            </DialogHeader>
+            <AuditTrail
+              discrepancy={selectedDiscrepancyForAudit}
+              onViewDocument={(evidence) => {
+                if (evidence) {
+                  openClauseReference(evidence);
+                }
+              }}
+            />
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {/* Enhanced Contract Chat Sheet */}
+      {chatOpen && jobId && (
+        <Sheet open={chatOpen} onOpenChange={setChatOpen}>
+          <SheetContent className="w-full sm:max-w-2xl">
+            <SheetHeader>
+              <SheetTitle>Contract Assistant</SheetTitle>
+            </SheetHeader>
+            <div className="mt-4 h-[calc(100vh-120px)]">
+              <ContractChat 
+                jobId={jobId} 
+                vendorName={analysis?.job.vendor_name}
+                onOpenDocument={(evidence: {
+                  type: string;
+                  file?: string;
+                  page?: number;
+                  label?: string;
+                  text?: string;
+                  bounds?: any;
+                  regions?: any[];
+                  metadata?: Record<string, any>;
+                }) => {
+                  if (evidence.type === "contract_clause" && evidence.file) {
+                    const doc = documents.find((d) => d.filename === evidence.file);
+                    if (doc) {
+                      // Only create default bounds if we don't have any bounds/regions
+                      // This prevents highlighting the entire page when we have no specific location
+                      let regions = evidence.regions;
+                      let bounds = evidence.bounds;
+                      
+                      // If we have bounds in metadata, use them
+                      if (!bounds && evidence.metadata?.bounds) {
+                        bounds = evidence.metadata.bounds;
+                      }
+                      
+                      // If we have regions in metadata, use them
+                      if (!regions && evidence.metadata?.regions) {
+                        regions = evidence.metadata.regions;
+                      }
+                      
+                      // Only create default regions if we have absolutely no location data
+                      // This way, if there's no bounds, the page will open without highlighting
+                      if (!regions && !bounds && evidence.page) {
+                        // Don't create default bounds - let it open without highlight
+                        // The user will see the page but not a full-page highlight
+                        regions = [];
+                      } else if (!regions && bounds && evidence.page) {
+                        // If we have bounds but no regions, create a region from bounds
+                        regions = [{
+                          page: evidence.page,
+                          bounds: bounds
+                        }];
+                      }
+                      
+                      const clauseEvidence: DiscrepancyEvidence = {
+                        type: "contract_clause",
+                        label: evidence.label || "Contract Reference",
+                        text: evidence.text || "",
+                        page: evidence.page || 1,
+                        file: evidence.file,
+                        bounds: bounds,
+                        regions: regions,
+                      };
+                      openClauseReference(clauseEvidence);
+                    }
+                  }
+                }}
+              />
+            </div>
+          </SheetContent>
+        </Sheet>
+      )}
     </div>
     </TooltipProvider>
   );

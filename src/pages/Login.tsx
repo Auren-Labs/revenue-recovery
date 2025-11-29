@@ -37,7 +37,8 @@ export default function Login() {
     setIsLoading(true);
 
     try {
-      const response = await fetch("http://localhost:8000/auth/login", {
+      const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
+      const response = await fetch(`${API_BASE}/auth/login`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -70,6 +71,9 @@ export default function Login() {
     setError("");
     setIsLoading(true);
 
+    // Declare API_BASE once at the top of the function
+    const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
+
     try {
       console.log("✅ Google login successful, sending token to backend...");
       console.log("🔑 Token received:", tokenResponse.access_token ? "Yes" : "No");
@@ -78,31 +82,67 @@ export default function Login() {
         throw new Error("No access token received from Google");
       }
       
-      // First, test if backend is reachable
-      console.log("🔍 Testing backend connectivity...");
+      // First, test if backend is reachable (try root endpoint first, then auth/health)
+      console.log("🔍 Testing backend connectivity...", API_BASE);
+      let backendReachable = false;
+      
+      // Try root health endpoint first (simpler, faster)
       try {
         const healthController = new AbortController();
-        const healthTimeout = setTimeout(() => healthController.abort(), 5000);
-        const healthCheck = await fetch("http://localhost:8000/auth/health", {
+        const healthTimeout = setTimeout(() => healthController.abort(), 5000); // 5 second timeout
+        const healthCheck = await fetch(`${API_BASE}/health`, {
           method: "GET",
-          signal: healthController.signal
+          signal: healthController.signal,
+          mode: "cors",
+          cache: "no-cache",
         });
         clearTimeout(healthTimeout);
         if (healthCheck.ok) {
-          console.log("✅ Backend is reachable");
-        } else {
-          throw new Error("Backend health check failed");
+          const healthData = await healthCheck.json().catch(() => ({}));
+          console.log("✅ Backend is reachable (root endpoint)", healthData);
+          backendReachable = true;
         }
-      } catch (healthError: any) {
-        console.error("❌ Backend health check failed:", healthError);
-        if (healthError.name === 'AbortError') {
-          throw new Error("Backend server is not responding. Please check if it's running on http://localhost:8000");
+      } catch (rootError: any) {
+        console.log("⚠️ Root health endpoint not available, trying auth/health...");
+        // Try auth/health as fallback
+        try {
+          const healthController = new AbortController();
+          const healthTimeout = setTimeout(() => healthController.abort(), 5000);
+          const healthCheck = await fetch(`${API_BASE}/auth/health`, {
+            method: "GET",
+            signal: healthController.signal,
+            mode: "cors",
+            cache: "no-cache",
+          });
+          clearTimeout(healthTimeout);
+          if (healthCheck.ok) {
+            const healthData = await healthCheck.json().catch(() => ({}));
+            console.log("✅ Backend is reachable (auth/health)", healthData);
+            backendReachable = true;
+          }
+        } catch (authError: any) {
+          console.error("❌ Both health checks failed:", authError);
+          // Only throw if it's a clear connection error
+          if (authError.name === 'AbortError' || rootError.name === 'AbortError') {
+            throw new Error(`Backend server is not responding. Please check if it's running on ${API_BASE}`);
+          }
+          if (authError.message?.includes('Failed to fetch') || 
+              authError.message?.includes('NetworkError') ||
+              authError.message?.includes('Network request failed') ||
+              rootError.message?.includes('Failed to fetch')) {
+            throw new Error(`Cannot connect to backend server. Please ensure it's running on ${API_BASE}`);
+          }
+          // For other errors, log but continue - the actual Google auth request will handle it
+          console.warn("⚠️ Health checks had issues but continuing with Google auth attempt...");
         }
-        throw new Error("Cannot connect to backend server. Please ensure it's running on http://localhost:8000");
+      }
+      
+      if (!backendReachable) {
+        console.warn("⚠️ Could not confirm backend is reachable, but continuing with Google auth attempt...");
       }
       
       // Send the Google access token to backend for verification
-      console.log("📤 Sending request to http://localhost:8000/auth/google...");
+      console.log(`📤 Sending request to ${API_BASE}/auth/google...`);
       
       const controller = new AbortController();
       const timeoutId = setTimeout(() => {
@@ -112,7 +152,7 @@ export default function Login() {
       
       let response: Response;
       try {
-        response = await fetch("http://localhost:8000/auth/google", {
+        response = await fetch(`${API_BASE}/auth/google`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -129,7 +169,7 @@ export default function Login() {
           throw new Error("Request timed out after 30 seconds. Please check if the backend server is running and responsive.");
         }
         if (fetchError.name === 'TypeError' && fetchError.message.includes('Failed to fetch')) {
-          throw new Error("Cannot connect to backend server. Please ensure it's running on http://localhost:8000");
+          throw new Error(`Cannot connect to backend server. Please ensure it's running on ${API_BASE}`);
         }
         throw new Error(`Network error: ${fetchError.message}`);
       }

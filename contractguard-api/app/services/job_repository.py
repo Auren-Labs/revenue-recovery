@@ -12,9 +12,12 @@ logger = logging.getLogger(__name__)
 
 
 def _client():
+    """Get Supabase client with error handling."""
     client = get_client()
     if not client:
-        raise RuntimeError("Supabase client not configured")
+        logger.warning("Supabase client not available - some operations may fail")
+        # Return None instead of raising - let callers handle it
+        return None
     return client
 
 
@@ -28,35 +31,46 @@ def _default_stages():
 
 
 def create_job_record(vendor_name: str, organization_id: Optional[str]) -> Job:
+    """Create a new job record. Returns Job object."""
     client = _client()
+    if not client:
+        raise RuntimeError("Supabase client not configured - cannot create job")
+    
     job_id = str(uuid4())
     now = datetime.utcnow().isoformat()
 
-    client.table("jobs").insert(
-        {
-            "id": job_id,
-            "vendor_name": vendor_name,
-            "customer_id": organization_id,  # Use customer_id (matches DB schema)
-            "created_at": now,
-            "updated_at": now,
-        }
-    ).execute()
-
-    stage_rows = []
-    for stage in _default_stages():
-        stage_rows.append(
+    try:
+        # Create job with timeout protection
+        logger.info(f"Creating job {job_id} for vendor {vendor_name}")
+        client.table("jobs").insert(
             {
-                "id": str(uuid4()),
-                "job_id": job_id,
-                "name": stage["name"],
-                "status": stage["status"],
-                "sequence": stage["sequence"],
+                "id": job_id,
+                "vendor_name": vendor_name,
+                "customer_id": organization_id,  # Use customer_id (matches DB schema)
+                "created_at": now,
+                "updated_at": now,
             }
-        )
-    client.table("job_stages").insert(stage_rows).execute()
-    client.table("job_metrics").upsert({"job_id": job_id, "metrics": {}, "updated_at": now}).execute()
+        ).execute()
 
-    return load_job(job_id)
+        stage_rows = []
+        for stage in _default_stages():
+            stage_rows.append(
+                {
+                    "id": str(uuid4()),
+                    "job_id": job_id,
+                    "name": stage["name"],
+                    "status": stage["status"],
+                    "sequence": stage["sequence"],
+                }
+            )
+        client.table("job_stages").insert(stage_rows).execute()
+        client.table("job_metrics").upsert({"job_id": job_id, "metrics": {}, "updated_at": now}).execute()
+
+        logger.info(f"Successfully created job {job_id}")
+        return load_job(job_id)
+    except Exception as e:
+        logger.error(f"Failed to create job {job_id}: {e}", exc_info=True)
+        raise RuntimeError(f"Failed to create job: {str(e)}")
 
 
 def load_job(job_id: str, organization_id: Optional[str] = None) -> Job | None:
@@ -169,36 +183,60 @@ def update_stage(job_id: str, stage_name: str, status: str, detail: Optional[str
 
 
 def upsert_documents(job_id: str, documents: List[Dict[str, Any]], document_type: str) -> None:
+    """Upsert documents. Non-blocking with error handling."""
     if not documents:
         return
     client = _client()
-    rows = []
-    for doc in documents:
-        rows.append(
-            {
-                "id": str(uuid4()),
-                "job_id": job_id,
-                "document_type": document_type,
-                "filename": doc.get("filename"),
-                "storage_provider": doc.get("storage"),
-                "storage_path": doc.get("storage_path"),
-                "local_path": doc.get("local_path"),
-                "metadata": doc.get("metadata") or {},
-            }
-        )
-    client.table("job_documents").insert(rows).execute()
+    if not client:
+        logger.warning(f"Cannot save documents for job {job_id} - Supabase not available")
+        return
+    try:
+        rows = []
+        for doc in documents:
+            rows.append(
+                {
+                    "id": str(uuid4()),
+                    "job_id": job_id,
+                    "document_type": document_type,
+                    "filename": doc.get("filename"),
+                    "storage_provider": doc.get("storage"),
+                    "storage_path": doc.get("storage_path"),
+                    "local_path": doc.get("local_path"),
+                    "metadata": doc.get("metadata") or {},
+                }
+            )
+        client.table("job_documents").insert(rows).execute()
+    except Exception as e:
+        logger.error(f"Failed to save documents for job {job_id}: {e}", exc_info=True)
+        # Don't raise - files are already stored locally
 
 
 def replace_billing_files(job_id: str, billing_docs: List[Dict[str, Any]]) -> None:
+    """Replace billing files. Non-blocking with error handling."""
     client = _client()
-    client.table("job_documents").delete().eq("job_id", job_id).eq("document_type", "billing").execute()
-    upsert_documents(job_id, billing_docs, "billing")
+    if not client:
+        logger.warning(f"Cannot save billing files for job {job_id} - Supabase not available")
+        return
+    try:
+        client.table("job_documents").delete().eq("job_id", job_id).eq("document_type", "billing").execute()
+        upsert_documents(job_id, billing_docs, "billing")
+    except Exception as e:
+        logger.error(f"Failed to save billing files for job {job_id}: {e}", exc_info=True)
+        # Don't raise - files are already stored locally
 
 
 def replace_contract_files(job_id: str, contract_docs: List[Dict[str, Any]]) -> None:
+    """Replace contract files. Non-blocking with error handling."""
     client = _client()
-    client.table("job_documents").delete().eq("job_id", job_id).eq("document_type", "contract").execute()
-    upsert_documents(job_id, contract_docs, "contract")
+    if not client:
+        logger.warning(f"Cannot save contract files for job {job_id} - Supabase not available")
+        return
+    try:
+        client.table("job_documents").delete().eq("job_id", job_id).eq("document_type", "contract").execute()
+        upsert_documents(job_id, contract_docs, "contract")
+    except Exception as e:
+        logger.error(f"Failed to save contract files for job {job_id}: {e}", exc_info=True)
+        # Don't raise - files are already stored locally
 
 
 def replace_discrepancies(job_id: str, discrepancies: List[Dict[str, Any]]) -> None:
@@ -224,14 +262,22 @@ def replace_discrepancies(job_id: str, discrepancies: List[Dict[str, Any]]) -> N
 
 
 def save_metrics(job_id: str, metrics: Dict[str, Any]) -> None:
+    """Save job metrics. Non-blocking with error handling."""
     client = _client()
-    client.table("job_metrics").upsert(
-        {
-            "job_id": job_id,
-            "metrics": metrics or {},
-            "updated_at": datetime.utcnow().isoformat(),
-        }
-    ).execute()
+    if not client:
+        logger.warning(f"Cannot save metrics for job {job_id} - Supabase not available")
+        return
+    try:
+        client.table("job_metrics").upsert(
+            {
+                "job_id": job_id,
+                "metrics": metrics or {},
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+        ).execute()
+    except Exception as e:
+        logger.error(f"Failed to save metrics for job {job_id}: {e}", exc_info=True)
+        # Don't raise - metrics can be saved later
 
 
 def list_jobs(customer_id: str, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:

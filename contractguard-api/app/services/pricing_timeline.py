@@ -107,105 +107,229 @@ class PricingTimeline:
         )
 
 
+# def build_pricing_timeline(rules: dict) -> PricingTimeline:
+#     """
+#     Build a complete pricing timeline from extracted rules.
+    
+#     SIMPLE STRATEGY:
+#     1. Always add base period first
+#     2. If escalation exists, add escalation period
+#     3. If amendments exist, add them (they override)
+#     """
+#     timeline = PricingTimeline()
+    
+#     timeline.escalation_rate = rules.get("escalation_rate", 0.0)
+#     timeline.currency = rules.get("currency", "INR")
+    
+#     base_amount = rules.get("base_amount")
+#     if not base_amount or base_amount == 0:
+#         logger.error("❌ No base amount found in rules!")
+#         return timeline
+    
+#     logger.info("="*80)
+#     logger.info("🏗️  BUILDING PRICING TIMELINE")
+#     logger.info(f"   Base amount: ₹{base_amount:,.0f}")
+#     logger.info(f"   Escalation rate: {rules.get('escalation_rate', 0)*100}%")
+#     logger.info(f"   Effective start: {rules.get('effective_start_date', 'N/A')}")
+    
+#     # 🔥 STEP 1: Always add BASE period
+#     base_start = rules.get("base_start_date", "2024-01-01")
+#     try:
+#         base_date = datetime.fromisoformat(str(base_start)).date()
+#     except Exception as e:
+#         logger.warning(f"Failed to parse base_start_date '{base_start}': {e}")
+#         base_date = date(2024, 1, 1)
+    
+#     timeline.add_period(
+#         start_date=base_date,
+#         amount=float(base_amount),
+#         source="MSA",
+#         reason="Original base pricing"
+#     )
+#     logger.info(f"   ✅ Base period: {base_date} → ₹{base_amount:,.0f}")
+    
+#     # 🔥 STEP 2: Add ESCALATION if it exists
+#     escalation_rate = rules.get("escalation_rate", 0.0)
+#     escalation_start = rules.get("effective_start_date")
+    
+#     if escalation_start and escalation_rate > 0:
+#         try:
+#             escalation_date = datetime.fromisoformat(str(escalation_start)).date()
+#             escalated_amount = float(base_amount) * (1 + float(escalation_rate))
+            
+#             timeline.add_period(
+#                 start_date=escalation_date,
+#                 amount=escalated_amount,
+#                 source="MSA",
+#                 reason=f"{escalation_rate*100}% annual escalation"
+#             )
+#             logger.info(f"   ✅ Escalation period: {escalation_date} → ₹{escalated_amount:,.0f}")
+#         except Exception as e:
+#             logger.error(f"   ❌ Failed to add escalation: {e}")
+    
+#     # 🔥 STEP 3: Add AMENDMENTS (if they exist and are NOT the base)
+#     amendment_history = rules.get("amendment_history", [])
+    
+#     if amendment_history:
+#         logger.info(f"   Processing {len(amendment_history)} amendment history entries...")
+        
+#         for idx, amendment in enumerate(amendment_history):
+#             description = amendment.get("description", "")
+            
+#             # Skip if this is the original base (we already added it)
+#             if "Original base" in description or "original base" in description.lower():
+#                 logger.info(f"      [{idx+1}] Skipping base entry: {description}")
+#                 continue
+            
+#             try:
+#                 date_str = amendment.get("date")
+#                 amount = amendment.get("amount")
+#                 source = amendment.get("source", "amendment")
+                
+#                 if not date_str or not amount:
+#                     logger.warning(f"      [{idx+1}] Missing date or amount, skipping")
+#                     continue
+                
+#                 period_date = datetime.fromisoformat(str(date_str)).date()
+                
+#                 timeline.add_period(
+#                     start_date=period_date,
+#                     amount=float(amount),
+#                     source=source,
+#                     reason=description
+#                 )
+#                 logger.info(f"      [{idx+1}] ✅ Amendment: {period_date} → ₹{amount:,.0f} ({description})")
+#             except Exception as e:
+#                 logger.error(f"      [{idx+1}] ❌ Failed to parse amendment: {e}")
+#                 continue
+    
+#     # 🔥 FINALIZE: Sort and dedupe
+#     timeline.finalize()
+    
+#     logger.info("="*80)
+    
+#     return timeline
+
 def build_pricing_timeline(rules: dict) -> PricingTimeline:
     """
     Build a complete pricing timeline from extracted rules.
-    
+
     SIMPLE STRATEGY:
-    1. Always add base period first
+    1. Always add base period first (using the ORIGINAL base)
     2. If escalation exists, add escalation period
     3. If amendments exist, add them (they override)
     """
     timeline = PricingTimeline()
-    
+
     timeline.escalation_rate = rules.get("escalation_rate", 0.0)
     timeline.currency = rules.get("currency", "INR")
-    
-    base_amount = rules.get("base_amount")
-    if not base_amount or base_amount == 0:
+
+    # This is the *latest* known amount (after amendments)
+    latest_base_amount = rules.get("base_amount")
+    if not latest_base_amount or latest_base_amount == 0:
         logger.error("❌ No base amount found in rules!")
         return timeline
-    
-    logger.info("="*80)
+
+    amendment_history = rules.get("amendment_history", [])
+
+    # 🔍 Find the ORIGINAL base in amendment_history, if present
+    original_base_entry = None
+    for entry in amendment_history:
+        desc = (entry.get("description") or "").lower()
+        if "original base" in desc:
+            original_base_entry = entry
+            break
+
+    if original_base_entry and original_base_entry.get("amount"):
+        base_amount_for_timeline = float(original_base_entry["amount"])
+        base_source = original_base_entry.get("source", "MSA")
+    else:
+        # Fallback: use latest amount if we don't have a tagged original base
+        base_amount_for_timeline = float(latest_base_amount)
+        base_source = "MSA"
+
+    logger.info("=" * 80)
     logger.info("🏗️  BUILDING PRICING TIMELINE")
-    logger.info(f"   Base amount: ₹{base_amount:,.0f}")
-    logger.info(f"   Escalation rate: {rules.get('escalation_rate', 0)*100}%")
+    logger.info(f"   Original/base amount for timeline: ₹{base_amount_for_timeline:,.0f}")
+    logger.info(f"   Latest base_amount (for reporting): ₹{float(latest_base_amount):,.0f}")
+    logger.info(f"   Escalation rate: {rules.get('escalation_rate', 0) * 100}%")
     logger.info(f"   Effective start: {rules.get('effective_start_date', 'N/A')}")
-    
-    # 🔥 STEP 1: Always add BASE period
+
+    # 🔥 STEP 1: Always add BASE period (using original base)
     base_start = rules.get("base_start_date", "2024-01-01")
     try:
         base_date = datetime.fromisoformat(str(base_start)).date()
     except Exception as e:
         logger.warning(f"Failed to parse base_start_date '{base_start}': {e}")
         base_date = date(2024, 1, 1)
-    
+
     timeline.add_period(
         start_date=base_date,
-        amount=float(base_amount),
-        source="MSA",
-        reason="Original base pricing"
+        amount=base_amount_for_timeline,
+        source=base_source,
+        reason="Original base pricing",
     )
-    logger.info(f"   ✅ Base period: {base_date} → ₹{base_amount:,.0f}")
-    
-    # 🔥 STEP 2: Add ESCALATION if it exists
+    logger.info(f"   ✅ Base period: {base_date} → ₹{base_amount_for_timeline:,.0f}")
+
+    # 🔥 STEP 2: Add ESCALATION if it exists (also based on original base)
     escalation_rate = rules.get("escalation_rate", 0.0)
     escalation_start = rules.get("effective_start_date")
-    
+
     if escalation_start and escalation_rate > 0:
         try:
             escalation_date = datetime.fromisoformat(str(escalation_start)).date()
-            escalated_amount = float(base_amount) * (1 + float(escalation_rate))
-            
+            escalated_amount = base_amount_for_timeline * (1 + float(escalation_rate))
+
             timeline.add_period(
                 start_date=escalation_date,
                 amount=escalated_amount,
                 source="MSA",
-                reason=f"{escalation_rate*100}% annual escalation"
+                reason=f"{escalation_rate * 100}% annual escalation",
             )
-            logger.info(f"   ✅ Escalation period: {escalation_date} → ₹{escalated_amount:,.0f}")
+            logger.info(
+                f"   ✅ Escalation period: {escalation_date} → ₹{escalated_amount:,.0f}"
+            )
         except Exception as e:
             logger.error(f"   ❌ Failed to add escalation: {e}")
-    
-    # 🔥 STEP 3: Add AMENDMENTS (if they exist and are NOT the base)
-    amendment_history = rules.get("amendment_history", [])
-    
+
+    # 🔥 STEP 3: Add AMENDMENTS (skip the original-base entry; they override)
     if amendment_history:
         logger.info(f"   Processing {len(amendment_history)} amendment history entries...")
-        
+
         for idx, amendment in enumerate(amendment_history):
-            description = amendment.get("description", "")
-            
+            description = amendment.get("description", "") or ""
+
             # Skip if this is the original base (we already added it)
-            if "Original base" in description or "original base" in description.lower():
+            if "original base" in description.lower():
                 logger.info(f"      [{idx+1}] Skipping base entry: {description}")
                 continue
-            
+
             try:
                 date_str = amendment.get("date")
                 amount = amendment.get("amount")
                 source = amendment.get("source", "amendment")
-                
+
                 if not date_str or not amount:
                     logger.warning(f"      [{idx+1}] Missing date or amount, skipping")
                     continue
-                
+
                 period_date = datetime.fromisoformat(str(date_str)).date()
-                
+
                 timeline.add_period(
                     start_date=period_date,
                     amount=float(amount),
                     source=source,
-                    reason=description
+                    reason=description,
                 )
-                logger.info(f"      [{idx+1}] ✅ Amendment: {period_date} → ₹{amount:,.0f} ({description})")
+                logger.info(
+                    f"      [{idx+1}] ✅ Amendment: {period_date} → ₹{amount:,.0f} ({description})"
+                )
             except Exception as e:
                 logger.error(f"      [{idx+1}] ❌ Failed to parse amendment: {e}")
                 continue
-    
+
     # 🔥 FINALIZE: Sort and dedupe
     timeline.finalize()
-    
-    logger.info("="*80)
-    
+    logger.info("=" * 80)
+
     return timeline

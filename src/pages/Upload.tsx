@@ -17,6 +17,10 @@ import {
   History,
   Settings,
   X,
+  File,
+  FileSpreadsheet,
+  Archive,
+  ChevronRight,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -241,38 +245,110 @@ const UploadPage = () => {
         </div>
       </div>
 
-      <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-16 space-y-10">
-        <header className="space-y-4 text-center">
-          <p className="text-sm font-semibold uppercase tracking-[0.3em] text-primary">Upload & Process</p>
-          <h1 className="text-4xl md:text-5xl font-bold text-primary">Run a Forensic Contract Audit</h1>
-          <p className="text-muted-foreground max-w-3xl mx-auto">
-            Drag in MSAs, SOWs, amendments, or invoice exports. ContractGuard will secure the files, extract pricing logic, and
-            reconcile each renewal to surface leakage—zero spreadsheets required.
-          </p>
-          {message && <p className="text-sm text-cta">{message}</p>}
+      <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-16 space-y-10 relative z-10">
+        <header className="space-y-5 text-center">
+          <p className="text-sm font-semibold uppercase tracking-[0.3em] text-primary/80">Upload & Process</p>
+          <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-foreground via-foreground/95 to-foreground/80 bg-clip-text text-transparent">
+            Run a Forensic Contract Audit
+          </h1>
+          <div className="space-y-2 max-w-3xl mx-auto">
+            <p className="text-muted-foreground leading-relaxed">
+              Drag in MSAs, SOWs, amendments, or invoice exports.
+            </p>
+            <p className="text-muted-foreground leading-relaxed">
+              ContractGuard will secure the files, extract pricing logic, and reconcile each renewal to surface leakage—zero spreadsheets required.
+            </p>
+          </div>
+          {message && <p className="text-sm text-cta font-medium">{message}</p>}
+          
+          {/* Step Indicator */}
+          {(step === 1 || step === 2) && (
+            <div className="flex items-center justify-center gap-4 pt-6">
+              <div className={`flex items-center gap-2 ${step === 1 ? 'text-primary' : 'text-success'}`}>
+                <div className={`h-8 w-8 rounded-full flex items-center justify-center font-semibold transition-all duration-300 ${
+                  step === 1 
+                    ? 'bg-primary/20 border-2 border-primary/40 shadow-sm' 
+                    : 'bg-success/20 border-2 border-success/40'
+                }`}>
+                  {step === 1 ? '1' : <CheckCircle2 className="h-4 w-4" />}
+                </div>
+                <span className="text-sm font-medium">Contracts</span>
+              </div>
+              <ChevronRight className="h-5 w-5 text-muted-foreground/50" />
+              <div className={`flex items-center gap-2 ${step === 2 ? 'text-primary' : 'text-muted-foreground'}`}>
+                <div className={`h-8 w-8 rounded-full flex items-center justify-center font-semibold transition-all duration-300 ${
+                  step === 2 
+                    ? 'bg-primary/20 border-2 border-primary/40 shadow-sm' 
+                    : 'bg-muted/30 border-2 border-border/40'
+                }`}>
+                  2
+                </div>
+                <span className="text-sm font-medium">Billing</span>
+              </div>
+            </div>
+          )}
         </header>
 
         {step === 1 && (
           <div className="grid lg:grid-cols-[1.2fr_0.8fr] gap-8">
             <div
               {...contractDropzone.getRootProps()}
-              className={`rounded-3xl border-2 border-dashed ${
-                contractDropzone.isDragActive ? "border-primary bg-primary/5" : "border-border"
-              } bg-card/80 backdrop-blur p-10 transition cursor-pointer`}
+              className={`group relative rounded-3xl border-2 ${
+                contractDropzone.isDragActive 
+                  ? "border-primary bg-gradient-to-br from-primary/10 via-primary/5 to-primary/10 shadow-lg shadow-primary/20" 
+                  : "border-border/50 bg-gradient-to-br from-card/90 to-card/70 backdrop-blur-sm hover:border-primary/30"
+              } p-10 transition-all duration-300 cursor-pointer overflow-hidden`}
             >
+              {/* Subtle background pattern */}
+              <div className="absolute inset-0 opacity-[0.02] bg-[radial-gradient(circle_at_50%_50%,_white_1px,_transparent_1px)] bg-[length:20px_20px]" />
+              
+              {/* Glow effect on hover/drag */}
+              {contractDropzone.isDragActive && (
+                <div className="absolute inset-0 bg-gradient-to-r from-primary/10 via-primary/5 to-primary/10 animate-pulse" />
+              )}
+              
               <input {...contractDropzone.getInputProps()} />
-              <div className="flex flex-col items-center text-center space-y-4">
-                <div className="h-16 w-16 rounded-full bg-primary/10 text-primary flex items-center justify-center">
-                  <UploadCloud className="h-8 w-8" />
+              <div className="relative z-10 flex flex-col items-center text-center space-y-5">
+                <div className={`h-20 w-20 rounded-2xl bg-gradient-to-br from-primary/20 to-primary/10 border-2 border-primary/30 flex items-center justify-center transition-all duration-300 ${
+                  contractDropzone.isDragActive ? 'scale-110 shadow-lg shadow-primary/30' : 'group-hover:scale-105'
+                }`}>
+                  <UploadCloud className={`h-10 w-10 text-primary transition-all duration-300 ${
+                    contractDropzone.isDragActive ? 'animate-bounce' : ''
+                  }`} />
                 </div>
-                <h3 className="text-2xl font-semibold text-foreground">1/2: Upload Contract Agreements</h3>
-                <p className="text-sm text-muted-foreground max-w-lg">
-                  Drag in the MSA, Statements of Work, and amendments for this vendor—even if they’re combined in a single file or ZIP. We’ll
-                  keep them together.
-                </p>
-                <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <Lock className="h-4 w-4" />
-                  <span>Secure upload. Files encrypted and never used for model training.</span>
+                <div className="space-y-2">
+                  <h3 className="text-2xl font-bold text-foreground">Upload Contract Agreements</h3>
+                  <p className="text-sm text-muted-foreground max-w-lg leading-relaxed">
+                    Drag files here or <button className="text-primary hover:underline font-medium">browse</button> to select
+                  </p>
+                </div>
+                
+                {/* File type chips */}
+                <div className="flex items-center gap-2 flex-wrap justify-center">
+                  <span className="text-xs px-3 py-1.5 rounded-full bg-muted/50 border border-border/50 text-muted-foreground flex items-center gap-1.5">
+                    <File className="h-3.5 w-3.5" />
+                    PDF
+                  </span>
+                  <span className="text-xs px-3 py-1.5 rounded-full bg-muted/50 border border-border/50 text-muted-foreground flex items-center gap-1.5">
+                    <FileText className="h-3.5 w-3.5" />
+                    DOCX
+                  </span>
+                  <span className="text-xs px-3 py-1.5 rounded-full bg-muted/50 border border-border/50 text-muted-foreground flex items-center gap-1.5">
+                    <Archive className="h-3.5 w-3.5" />
+                    ZIP
+                  </span>
+                </div>
+                
+                {/* Preview area hint */}
+                {contractFiles.length === 0 && (
+                  <div className="w-full text-center py-4 px-6 rounded-xl bg-muted/20 border border-border/30">
+                    <p className="text-xs text-muted-foreground italic">Your files will appear here</p>
+                  </div>
+                )}
+                
+                <div className="flex items-center gap-2 text-xs text-muted-foreground bg-muted/30 px-4 py-2 rounded-full border border-border/30">
+                  <Lock className="h-3.5 w-3.5" />
+                  <span>End-to-end encrypted • Never used for training</span>
                 </div>
                 {contractFiles.length > 0 && (
                   <div className="w-full text-left space-y-2">
@@ -291,28 +367,60 @@ const UploadPage = () => {
               </div>
             </div>
 
-            <div className="rounded-3xl border border-border bg-card/80 backdrop-blur p-8 space-y-5 shadow-hover">
-              <label className="text-sm font-semibold text-foreground flex flex-col gap-2 text-left">
-                Vendor name
+            <div className="rounded-3xl border border-border/50 bg-card/90 backdrop-blur-sm p-8 space-y-6 shadow-lg">
+              {/* Vendor name input */}
+              <div className="space-y-2">
+                <label className="text-sm font-semibold text-foreground block">
+                  Vendor name
+                </label>
                 <input
                   type="text"
                   value={vendorName}
                   onChange={(e) => setVendorName(e.target.value)}
                   placeholder="e.g. Acme Cloud"
-                  className="h-10 rounded-lg border border-border bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                  className="w-full h-11 rounded-xl border border-border/50 bg-background/50 px-4 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 focus:bg-background transition-colors"
                 />
-              </label>
-              <h3 className="text-xl font-semibold text-foreground">What counts as "Contract Agreements"?</h3>
-              <ul className="list-disc pl-5 text-sm text-muted-foreground space-y-2">
-                <li>Master Services Agreement (MSA)</li>
-                <li>All Statements of Work (SOWs) or Order Forms</li>
-                <li>Rate cards, amendments, auto-renew addenda</li>
-              </ul>
-              <p className="text-sm text-muted-foreground">
-                We automatically separate bundled documents and extract the clauses that govern pricing logic.
-              </p>
-              <Button variant="cta" className="w-full" disabled={!contractFiles.length} onClick={handleNextStep}>
-                Next: Upload Billing Data
+              </div>
+              
+              {/* Divider */}
+              <div className="h-px bg-border/50" />
+              
+              {/* What counts section */}
+              <div className="space-y-4">
+                <h3 className="text-lg font-bold text-foreground">What counts as "Contract Agreements"?</h3>
+                <ul className="space-y-3">
+                  <li className="flex items-start gap-3 text-sm text-muted-foreground">
+                    <FileText className="h-5 w-5 text-primary/60 flex-shrink-0 mt-0.5" />
+                    <span><strong className="text-foreground">Master Services Agreement (MSA)</strong></span>
+                  </li>
+                  <li className="flex items-start gap-3 text-sm text-muted-foreground">
+                    <File className="h-5 w-5 text-primary/60 flex-shrink-0 mt-0.5" />
+                    <span><strong className="text-foreground">All Statements of Work (SOWs)</strong> or Order Forms</span>
+                  </li>
+                  <li className="flex items-start gap-3 text-sm text-muted-foreground">
+                    <Archive className="h-5 w-5 text-primary/60 flex-shrink-0 mt-0.5" />
+                    <span><strong className="text-foreground">Rate cards, amendments,</strong> auto-renew addenda</span>
+                  </li>
+                </ul>
+                <div className="rounded-lg bg-muted/30 border border-border/30 p-3">
+                  <p className="text-xs text-muted-foreground leading-relaxed">
+                    We automatically separate bundled documents and extract the clauses that govern pricing logic.
+                  </p>
+                </div>
+              </div>
+              
+              {/* Divider */}
+              <div className="h-px bg-border/50" />
+              
+              {/* Continue button */}
+              <Button 
+                variant="cta" 
+                className="w-full h-12 rounded-xl font-semibold shadow-lg hover:shadow-xl transition-all duration-300" 
+                disabled={!contractFiles.length} 
+                onClick={handleNextStep}
+              >
+                Continue to Billing Data
+                <ChevronRight className="h-4 w-4 ml-2" />
               </Button>
             </div>
           </div>
@@ -322,39 +430,80 @@ const UploadPage = () => {
           <div className="grid lg:grid-cols-[1.2fr_0.8fr] gap-8">
             <div
               {...billingDropzone.getRootProps()}
-              className={`rounded-3xl border-2 border-dashed ${
-                billingDropzone.isDragActive ? "border-primary bg-primary/5" : "border-border"
-              } bg-card/80 backdrop-blur p-10 transition cursor-pointer`}
+              className={`group relative rounded-3xl border-2 ${
+                billingDropzone.isDragActive 
+                  ? "border-primary bg-gradient-to-br from-primary/10 via-primary/5 to-primary/10 shadow-lg shadow-primary/20" 
+                  : "border-border/50 bg-gradient-to-br from-card/90 to-card/70 backdrop-blur-sm hover:border-primary/30"
+              } p-10 transition-all duration-300 cursor-pointer overflow-hidden`}
             >
+              {/* Subtle background pattern */}
+              <div className="absolute inset-0 opacity-[0.02] bg-[radial-gradient(circle_at_50%_50%,_white_1px,_transparent_1px)] bg-[length:20px_20px]" />
+              
+              {/* Glow effect on hover/drag */}
+              {billingDropzone.isDragActive && (
+                <div className="absolute inset-0 bg-gradient-to-r from-primary/10 via-primary/5 to-primary/10 animate-pulse" />
+              )}
+              
               <input {...billingDropzone.getInputProps()} />
-              <div className="flex flex-col items-center text-center space-y-4">
-                <div className="h-16 w-16 rounded-full bg-primary/10 text-primary flex items-center justify-center">
-                  <UploadCloud className="h-8 w-8" />
+              <div className="relative z-10 flex flex-col items-center text-center space-y-5">
+                <div className={`h-20 w-20 rounded-2xl bg-gradient-to-br from-primary/20 to-primary/10 border-2 border-primary/30 flex items-center justify-center transition-all duration-300 ${
+                  billingDropzone.isDragActive ? 'scale-110 shadow-lg shadow-primary/30' : 'group-hover:scale-105'
+                }`}>
+                  <UploadCloud className={`h-10 w-10 text-primary transition-all duration-300 ${
+                    billingDropzone.isDragActive ? 'animate-bounce' : ''
+                  }`} />
                 </div>
-                <h3 className="text-2xl font-semibold text-foreground">2/2: Upload Billing Records</h3>
-                <p className="text-sm text-muted-foreground max-w-lg">
-                  Upload one or more CSV or XLSX exports of invoices or billing line items for this vendor from Stripe, NetSuite, QuickBooks,
-                  or your billing system. You can upload multiple files—we'll combine them automatically. We map every line item back to the contract rules.
-                </p>
-                <Button variant="ghost" size="sm" className="gap-2 text-primary">
+                <div className="space-y-2">
+                  <h3 className="text-2xl font-bold text-foreground">Upload Billing Records</h3>
+                  <p className="text-sm text-muted-foreground max-w-lg leading-relaxed">
+                    Drag files here or <button className="text-primary hover:underline font-medium">browse</button> to select
+                  </p>
+                </div>
+                
+                {/* File type chips */}
+                <div className="flex items-center gap-2 flex-wrap justify-center">
+                  <span className="text-xs px-3 py-1.5 rounded-full bg-muted/50 border border-border/50 text-muted-foreground flex items-center gap-1.5">
+                    <FileSpreadsheet className="h-3.5 w-3.5" />
+                    CSV
+                  </span>
+                  <span className="text-xs px-3 py-1.5 rounded-full bg-muted/50 border border-border/50 text-muted-foreground flex items-center gap-1.5">
+                    <FileSpreadsheet className="h-3.5 w-3.5" />
+                    XLSX
+                  </span>
+                </div>
+                
+                <Button variant="ghost" size="sm" className="gap-2 text-primary hover:bg-primary/10 rounded-xl">
                   <Download className="h-4 w-4" />
                   Download Billing CSV Template
                 </Button>
+                
+                {/* Preview area hint */}
+                {billingFiles.length === 0 && (
+                  <div className="w-full text-center py-4 px-6 rounded-xl bg-muted/20 border border-border/30">
+                    <p className="text-xs text-muted-foreground italic">Your billing files will appear here</p>
+                  </div>
+                )}
                 {billingFiles.length > 0 && (
-                  <div className="w-full text-left space-y-2">
-                    <p className="text-sm text-muted-foreground">Billing data ({billingFiles.length} {billingFiles.length === 1 ? "file" : "files"})</p>
-                    <ul className="space-y-2 max-h-48 overflow-y-auto">
+                  <div className="w-full text-left space-y-3 mt-4">
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm font-semibold text-foreground">Billing data ({billingFiles.length} {billingFiles.length === 1 ? "file" : "files"})</p>
+                      <p className="text-xs text-muted-foreground">Total: {billingSize} MB</p>
+                    </div>
+                    <ul className="space-y-2 max-h-48 overflow-y-auto rounded-lg bg-muted/20 border border-border/30 p-3">
                       {billingFiles.map((file, index) => (
-                        <li key={`${file.name}-${index}`} className="flex items-center justify-between text-sm text-foreground group">
-                          <span className="flex-1 truncate">{file.name}</span>
-                          <div className="flex items-center gap-2">
-                            <span className="text-muted-foreground">{(file.size / (1024 * 1024)).toFixed(2)} MB</span>
+                        <li key={`${file.name}-${index}`} className="flex items-center justify-between text-sm text-foreground group/item py-2 px-3 rounded-lg hover:bg-muted/40 transition-colors">
+                          <div className="flex items-center gap-2 flex-1 min-w-0">
+                            <FileSpreadsheet className="h-4 w-4 text-primary/60 flex-shrink-0" />
+                            <span className="truncate">{file.name}</span>
+                          </div>
+                          <div className="flex items-center gap-2 flex-shrink-0">
+                            <span className="text-xs text-muted-foreground">{(file.size / (1024 * 1024)).toFixed(2)} MB</span>
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
                                 setBillingFiles((prev) => prev.filter((_, i) => i !== index));
                               }}
-                              className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-destructive/10 rounded text-destructive"
+                              className="opacity-0 group-hover/item:opacity-100 transition-opacity p-1.5 hover:bg-destructive/10 rounded-lg text-destructive"
                               aria-label="Remove file"
                             >
                               <X className="h-4 w-4" />
@@ -363,27 +512,50 @@ const UploadPage = () => {
                         </li>
                       ))}
                     </ul>
-                    <p className="text-xs text-muted-foreground">Total size: {billingSize} MB</p>
                   </div>
                 )}
               </div>
             </div>
 
-            <div className="rounded-3xl border border-border bg-card/80 backdrop-blur p-8 space-y-5 shadow-hover">
-              <h3 className="text-xl font-semibold text-foreground">Why we need billing data</h3>
-              <p className="text-sm text-muted-foreground">
-                We compare what was billed vs. what should have been billed per the contract. The more line-item detail, the more precise
-                the leakage calculation.
-              </p>
-              <ul className="list-disc pl-5 text-sm text-muted-foreground space-y-2">
-                <li>Include invoice date, SKU/description, unit price, quantity, discounts, total.</li>
-                <li>You can export from any system—the template shows preferred columns.</li>
-              </ul>
-              <div className="text-sm text-muted-foreground flex items-center gap-2">
-                <Clock className="h-4 w-4" />
-                <span>Analysis takes ~5–10 minutes. We email the Revenue Recovery Report when done.</span>
+            <div className="rounded-3xl border border-border/50 bg-card/90 backdrop-blur-sm p-8 space-y-6 shadow-lg">
+              <div className="space-y-4">
+                <h3 className="text-lg font-bold text-foreground">Why we need billing data</h3>
+                <p className="text-sm text-muted-foreground leading-relaxed">
+                  We compare what was billed vs. what should have been billed per the contract. The more line-item detail, the more precise
+                  the leakage calculation.
+                </p>
+                <ul className="space-y-3">
+                  <li className="flex items-start gap-3 text-sm text-muted-foreground">
+                    <CheckCircle2 className="h-4 w-4 text-primary/60 flex-shrink-0 mt-0.5" />
+                    <span>Include invoice date, SKU/description, unit price, quantity, discounts, total.</span>
+                  </li>
+                  <li className="flex items-start gap-3 text-sm text-muted-foreground">
+                    <CheckCircle2 className="h-4 w-4 text-primary/60 flex-shrink-0 mt-0.5" />
+                    <span>You can export from any system—the template shows preferred columns.</span>
+                  </li>
+                </ul>
               </div>
-              <Button variant="cta" className="w-full" disabled={!billingFiles.length} onClick={handleNextStep}>
+              
+              {/* Divider */}
+              <div className="h-px bg-border/50" />
+              
+              <div className="rounded-lg bg-muted/30 border border-border/30 p-4">
+                <div className="flex items-start gap-3 text-sm text-muted-foreground">
+                  <Clock className="h-5 w-5 text-primary/60 flex-shrink-0 mt-0.5" />
+                  <span>Analysis takes ~5–10 minutes. We email the Revenue Recovery Report when done.</span>
+                </div>
+              </div>
+              
+              {/* Divider */}
+              <div className="h-px bg-border/50" />
+              
+              <Button 
+                variant="cta" 
+                className="w-full h-12 rounded-xl font-semibold shadow-lg hover:shadow-xl transition-all duration-300" 
+                disabled={!billingFiles.length} 
+                onClick={handleNextStep}
+              >
+                <Sparkles className="h-4 w-4 mr-2" />
                 Run Audit & Find Leakage
               </Button>
             </div>
@@ -391,83 +563,133 @@ const UploadPage = () => {
         )}
 
         {step === 3 && (
-          <div className="rounded-3xl border border-border bg-card/85 backdrop-blur p-10 shadow-hero flex flex-col items-center text-center space-y-8">
-            {/* Overall Progress Circle */}
-            <div className="relative">
-              <div className="relative h-32 w-32">
-                <svg className="transform -rotate-90 h-32 w-32" viewBox="0 0 120 120">
-                  {/* Background circle */}
+          <div className="relative rounded-3xl border border-border/50 bg-gradient-to-b from-card/95 to-card/80 backdrop-blur-xl p-10 shadow-2xl flex flex-col items-center text-center space-y-10 overflow-hidden">
+            {/* Subtle background effects */}
+            <div className="absolute inset-0 bg-gradient-radial from-primary/5 via-transparent to-transparent opacity-50" />
+            <div className="absolute inset-0 opacity-[0.02] bg-[radial-gradient(circle_at_50%_50%,_white_1px,_transparent_1px)] bg-[length:24px_24px]" />
+            
+            {/* Overall Progress Circle - Hero Element */}
+            <div className="relative z-10">
+              {/* Outer glow effect */}
+              <div className="absolute inset-0 flex items-center justify-center">
+                <div 
+                  className="absolute rounded-full bg-primary/20 blur-2xl animate-pulse"
+                  style={{ 
+                    width: '180px', 
+                    height: '180px',
+                    animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite'
+                  }}
+                />
+              </div>
+              
+              <div className="relative h-40 w-40 drop-shadow-2xl">
+                <svg className="transform -rotate-90 h-40 w-40" viewBox="0 0 140 140">
+                  {/* Background circle - thicker */}
                   <circle
-                    cx="60"
-                    cy="60"
-                    r="54"
+                    cx="70"
+                    cy="70"
+                    r="62"
                     stroke="currentColor"
-                    strokeWidth="8"
+                    strokeWidth="10"
                     fill="none"
-                    className="text-border/30"
+                    className="text-border/20"
                   />
-                  {/* Progress circle */}
+                  {/* Progress circle with gradient */}
                   {(() => {
                     const progress = reconProgress?.percent ?? 0;
-                    const circumference = 2 * Math.PI * 54;
+                    const circumference = 2 * Math.PI * 62;
                     const offset = circumference * (1 - progress);
                     return (
-                      <circle
-                        cx="60"
-                        cy="60"
-                        r="54"
-                        stroke="url(#progressGradient)"
-                        strokeWidth="8"
-                        fill="none"
-                        strokeLinecap="round"
-                        strokeDasharray={circumference}
-                        strokeDashoffset={offset}
-                        className="transition-all duration-500 ease-out"
-                      />
+                      <>
+                        {/* Glow effect behind progress */}
+                        <circle
+                          cx="70"
+                          cy="70"
+                          r="62"
+                          stroke="url(#progressGlow)"
+                          strokeWidth="12"
+                          fill="none"
+                          strokeLinecap="round"
+                          strokeDasharray={circumference}
+                          strokeDashoffset={offset}
+                          className="opacity-30 blur-sm"
+                        />
+                        {/* Main progress circle */}
+                        <circle
+                          cx="70"
+                          cy="70"
+                          r="62"
+                          stroke="url(#progressGradient)"
+                          strokeWidth="10"
+                          fill="none"
+                          strokeLinecap="round"
+                          strokeDasharray={circumference}
+                          strokeDashoffset={offset}
+                          className="transition-all duration-700 ease-out drop-shadow-lg"
+                        />
+                      </>
                     );
                   })()}
                   <defs>
                     <linearGradient id="progressGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                      <stop offset="0%" stopColor="hsl(var(--primary))" />
-                      <stop offset="100%" stopColor="hsl(var(--primary) / 0.6)" />
+                      <stop offset="0%" stopColor="hsl(142, 76%, 50%)" />
+                      <stop offset="50%" stopColor="hsl(var(--primary))" />
+                      <stop offset="100%" stopColor="hsl(142, 76%, 40%)" />
+                    </linearGradient>
+                    <linearGradient id="progressGlow" x1="0%" y1="0%" x2="100%" y2="100%">
+                      <stop offset="0%" stopColor="hsl(142, 76%, 60%)" />
+                      <stop offset="100%" stopColor="hsl(var(--primary))" />
                     </linearGradient>
                   </defs>
                 </svg>
                 <div className="absolute inset-0 flex items-center justify-center">
                   <div className="text-center">
-                    <div className="text-3xl font-bold text-foreground">
+                    <div className="text-5xl font-bold bg-gradient-to-b from-foreground to-foreground/80 bg-clip-text text-transparent">
                       {Math.round((reconProgress?.percent ?? 0) * 100)}%
                     </div>
-                    <div className="text-xs text-muted-foreground mt-1">Complete</div>
+                    <div className="text-xs text-muted-foreground mt-1.5 font-medium">Complete</div>
                   </div>
                 </div>
               </div>
+              
+              {/* Pulsing activity indicator */}
               {isUploading && (
-                <div className="absolute -top-2 -right-2 h-6 w-6 rounded-full bg-primary/20 border-2 border-primary animate-pulse flex items-center justify-center">
-                  <div className="h-2 w-2 rounded-full bg-primary" />
+                <div className="absolute -top-1 -right-1 h-7 w-7 rounded-full bg-primary/30 border-2 border-primary/50 animate-pulse flex items-center justify-center shadow-lg">
+                  <div className="h-2.5 w-2.5 rounded-full bg-primary animate-ping" />
                 </div>
               )}
             </div>
 
-            <div>
-              <p className="text-xs uppercase tracking-[0.4em] text-muted-foreground">ContractGuard pipeline</p>
-              <h3 className="text-3xl md:text-4xl font-semibold text-foreground mt-2">Audit in progress</h3>
+            <div className="relative z-10 space-y-3">
+              <p className="text-xs uppercase tracking-[0.4em] text-muted-foreground font-semibold">ContractGuard pipeline</p>
+              <h3 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-foreground via-foreground/90 to-foreground/70 bg-clip-text text-transparent">
+                Audit in progress
+              </h3>
             </div>
             
-            {/* Progress Message */}
+            {/* Progress Message with AI indicator */}
             {reconProgress?.message && (
-              <div className="px-4 py-2 rounded-lg bg-primary/5 border border-primary/20 text-sm text-foreground/80 max-w-2xl">
-                {reconProgress.message}
+              <div className="relative z-10 px-5 py-3 rounded-xl bg-gradient-to-r from-primary/10 via-primary/5 to-primary/10 border border-primary/30 text-sm text-foreground/90 max-w-2xl backdrop-blur-sm">
+                <div className="flex items-center gap-2 justify-center">
+                  <Sparkles className="h-4 w-4 text-primary animate-pulse" />
+                  <span>{reconProgress.message}</span>
+                </div>
               </div>
             )}
 
-            <p className="text-sm text-muted-foreground max-w-2xl">
-              Analyzing contract rules, aligning them with your billing export, and drafting AI insights. You can close this tab—we'll email
-              the full Revenue Recovery Report as soon as it's ready.
-            </p>
+            <div className="relative z-10 space-y-2 max-w-2xl">
+              <p className="text-sm text-muted-foreground leading-relaxed">
+                Analyzing contract rules, aligning them with your billing export,<br />
+                and drafting AI insights. You can close this tab—we'll email the full Revenue Recovery Report as soon as it's ready.
+              </p>
+              <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground/70 pt-2">
+                <Lock className="h-3 w-3" />
+                <span>End-to-end encrypted</span>
+              </div>
+            </div>
 
             {/* Stage Progress Indicators */}
-            <div className="w-full max-w-3xl space-y-3">
+            <div className="w-full max-w-3xl space-y-4 relative z-10">
               {(stageOrder as Stage[]).map((stage, index) => {
                 const Icon = stageLabels[stage].icon;
                 const currentIndex = currentStage ? stageOrder.indexOf(currentStage) : -1;
@@ -479,108 +701,129 @@ const UploadPage = () => {
                 return (
                   <div
                     key={stage}
-                    className={`relative flex items-center gap-4 p-4 rounded-xl border transition-all duration-300 ${
+                    className={`relative flex items-center gap-5 p-5 rounded-2xl border transition-all duration-500 ${
                       isActive
-                        ? "bg-primary/5 border-primary/30 shadow-sm scale-[1.02]"
+                        ? "bg-gradient-to-r from-primary/10 via-primary/5 to-primary/10 border-primary/40 shadow-lg shadow-primary/10 scale-[1.02]"
                         : isDone
-                          ? "bg-success/5 border-success/20"
-                          : "bg-card/50 border-border/40 opacity-60"
+                          ? "bg-success/5 border-success/20 opacity-75"
+                          : "bg-card/30 border-border/30 opacity-45"
                     }`}
                   >
-                    {/* Animated background gradient for active stage */}
+                    {/* Left accent border for active step */}
                     {isActive && (
-                      <div className="absolute inset-0 rounded-xl bg-gradient-to-r from-primary/5 via-primary/10 to-primary/5 animate-pulse" />
+                      <div className="absolute left-0 top-0 bottom-0 w-1 bg-gradient-to-b from-primary via-primary/80 to-primary rounded-l-2xl" />
                     )}
                     
-                    {/* Stage Icon */}
-                    <div className="relative z-10">
+                    {/* Animated shimmer effect for active stage */}
+                    {isActive && (
+                      <div className="absolute inset-0 rounded-2xl bg-gradient-to-r from-transparent via-white/5 to-transparent animate-shimmer" 
+                        style={{
+                          backgroundSize: '200% 100%',
+                          animation: 'shimmer 3s ease-in-out infinite'
+                        }}
+                      />
+                    )}
+                    
+                    {/* Stage Icon Container */}
+                    <div className="relative z-10 flex-shrink-0">
                       <div
-                        className={`h-12 w-12 rounded-xl flex items-center justify-center transition-all duration-300 ${
+                        className={`h-14 w-14 rounded-xl flex items-center justify-center transition-all duration-500 ${
                           isActive
-                            ? "bg-primary/10 text-primary border-2 border-primary/40 shadow-lg"
+                            ? "bg-gradient-to-br from-primary/20 to-primary/10 text-primary border-2 border-primary/50 shadow-lg shadow-primary/20"
                             : isDone
-                              ? "bg-success/10 text-success border-2 border-success/30"
-                              : "bg-muted text-muted-foreground border-2 border-border/60"
+                              ? "bg-success/15 text-success border-2 border-success/30"
+                              : "bg-muted/50 text-muted-foreground border-2 border-border/40"
                         }`}
                       >
                         {isActive ? (
-                          <Loader2 className="h-6 w-6 animate-spin" />
+                          <Loader2 className="h-7 w-7 animate-spin" />
                         ) : isDone ? (
-                          <CheckCircle2 className="h-6 w-6" />
+                          <CheckCircle2 className="h-7 w-7 animate-in zoom-in duration-300" />
                         ) : (
-                          <Icon className="h-6 w-6" />
+                          <Icon className="h-7 w-7" />
                         )}
                       </div>
+                      {/* Pulsing ring for active step */}
+                      {isActive && (
+                        <div className="absolute inset-0 rounded-xl border-2 border-primary/30 animate-ping" />
+                      )}
                     </div>
 
                     {/* Stage Info */}
-                    <div className="flex-1 text-left relative z-10">
-                      <div className="flex items-center gap-2">
-                        <p className={`font-semibold transition-colors ${
-                          isActive ? "text-primary" : isDone ? "text-success" : "text-foreground/60"
+                    <div className="flex-1 text-left relative z-10 min-w-0">
+                      <div className="flex items-center gap-3 flex-wrap">
+                        <p className={`font-bold text-base transition-colors ${
+                          isActive ? "text-primary" : isDone ? "text-success" : "text-foreground/50"
                         }`}>
                           {stageLabels[stage].title}
                         </p>
                         {isActive && (
-                          <span className="text-xs px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20">
+                          <span className="text-xs px-3 py-1 rounded-full bg-primary/15 text-primary border border-primary/30 font-medium flex items-center gap-1.5">
+                            <span className="relative flex h-2 w-2">
+                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
+                              <span className="relative inline-flex rounded-full h-2 w-2 bg-primary"></span>
+                            </span>
                             Processing...
                           </span>
                         )}
                       </div>
-                      <p className="text-xs text-muted-foreground mt-0.5">{stageLabels[stage].description}</p>
+                      <p className={`text-sm mt-1.5 transition-colors ${
+                        isActive ? "text-muted-foreground" : isDone ? "text-muted-foreground/70" : "text-muted-foreground/50"
+                      }`}>
+                        {stageLabels[stage].description}
+                      </p>
                     </div>
 
-                    {/* Stage Progress Bar (only for active stage) */}
-                    {isActive && reconProgress && (
-                      <div className="relative z-10 w-32">
-                        <div className="w-full h-1.5 bg-secondary/30 rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-gradient-to-r from-primary to-primary/60 rounded-full transition-all duration-500 ease-out relative overflow-hidden"
-                            style={{
-                              width: `${Math.min(100, Math.max(0, Math.round((reconProgress.percent ?? 0) * 100)))}%`,
-                            }}
-                          >
-                            <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent animate-shimmer" />
+                    {/* Completion Checkmark with glow */}
+                    {isDone && (
+                      <div className="relative z-10 flex-shrink-0">
+                        <div className="relative">
+                          <CheckCircle2 className="h-6 w-6 text-success drop-shadow-lg" />
+                          <div className="absolute inset-0 h-6 w-6 text-success/30 blur-sm">
+                            <CheckCircle2 className="h-full w-full" />
                           </div>
                         </div>
-                      </div>
-                    )}
-
-                    {/* Completion Checkmark */}
-                    {isDone && (
-                      <div className="relative z-10">
-                        <CheckCircle2 className="h-5 w-5 text-success" />
                       </div>
                     )}
                   </div>
                 );
               })}
             </div>
-            <Button variant="secondary" className="gap-2" onClick={() => navigate(jobId ? `/dashboard?job=${jobId}` : "/dashboard")}>
+            <Button 
+              variant="secondary" 
+              className="gap-2 rounded-xl shadow-lg hover:shadow-xl transition-all duration-300 relative z-10" 
+              onClick={() => navigate(jobId ? `/dashboard?job=${jobId}` : "/dashboard")}
+            >
               Go to Dashboard
             </Button>
           </div>
         )}
 
-        <section className="grid gap-6 lg:grid-cols-3">
-          <div className="rounded-2xl border border-border bg-card/80 p-6 space-y-3">
-            <ShieldCheck className="h-6 w-6 text-primary" />
-            <p className="text-lg font-semibold text-foreground">SOC2-grade security</p>
-            <p className="text-sm text-muted-foreground">
+        <section className="grid gap-6 lg:grid-cols-3 pt-4">
+          <div className="group rounded-2xl border border-border/50 bg-card/90 backdrop-blur-sm p-6 space-y-4 hover:border-primary/30 hover:shadow-lg hover:shadow-primary/5 transition-all duration-300 cursor-default">
+            <div className="h-12 w-12 rounded-xl bg-gradient-to-br from-primary/20 to-primary/10 border border-primary/20 flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
+              <ShieldCheck className="h-6 w-6 text-primary" />
+            </div>
+            <p className="text-lg font-bold text-foreground">SOC2-grade security</p>
+            <p className="text-sm text-muted-foreground leading-relaxed">
               Files are encrypted in transit and at rest. You control automatic deletion windows for sensitive contracts.
             </p>
           </div>
-          <div className="rounded-2xl border border-border bg-card/80 p-6 space-y-3">
-            <Clock className="h-6 w-6 text-primary" />
-            <p className="text-lg font-semibold text-foreground">Faster than manual audits</p>
-            <p className="text-sm text-muted-foreground">
+          <div className="group rounded-2xl border border-border/50 bg-card/90 backdrop-blur-sm p-6 space-y-4 hover:border-primary/30 hover:shadow-lg hover:shadow-primary/5 transition-all duration-300 cursor-default">
+            <div className="h-12 w-12 rounded-xl bg-gradient-to-br from-primary/20 to-primary/10 border border-primary/20 flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
+              <Clock className="h-6 w-6 text-primary" />
+            </div>
+            <p className="text-lg font-bold text-foreground">Faster than manual audits</p>
+            <p className="text-sm text-muted-foreground leading-relaxed">
               Teams typically uncover leakage in under 5 minutes—before the next customer renewal hits your inbox.
             </p>
           </div>
-          <div className="rounded-2xl border border-border bg-card/80 p-6 space-y-3">
-            <AlertTriangle className="h-6 w-6 text-primary" />
-            <p className="text-lg font-semibold text-foreground">Actionable discrepancies</p>
-            <p className="text-sm text-muted-foreground">
+          <div className="group rounded-2xl border border-border/50 bg-card/90 backdrop-blur-sm p-6 space-y-4 hover:border-primary/30 hover:shadow-lg hover:shadow-primary/5 transition-all duration-300 cursor-default">
+            <div className="h-12 w-12 rounded-xl bg-gradient-to-br from-primary/20 to-primary/10 border border-primary/20 flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
+              <AlertTriangle className="h-6 w-6 text-primary" />
+            </div>
+            <p className="text-lg font-bold text-foreground">Actionable discrepancies</p>
+            <p className="text-sm text-muted-foreground leading-relaxed">
               Every flag includes contract references, invoice math, and suggested next steps so you can rebill confidently.
             </p>
           </div>

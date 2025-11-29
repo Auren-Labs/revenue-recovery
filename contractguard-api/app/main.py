@@ -1,10 +1,12 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from pathlib import Path
 
-from app.routes import upload, analysis, files, auth, export
+from app.routes import upload, analysis, files, auth, export, chat, disputes
 from app.middleware.rate_limit import RateLimitMiddleware
+from app.routes.feedback import router as feedback_router
 
 # Load env vars from project root (.env sits one level above contractguard-api)
 ROOT_ENV = Path(__file__).resolve().parents[2] / ".env"
@@ -39,6 +41,18 @@ def create_app() -> FastAPI:
     app.include_router(analysis.router, prefix="/analysis", tags=["analysis"])
     app.include_router(files.router, tags=["files"])
     app.include_router(export.router, prefix="/export", tags=["export"])
+    app.include_router(chat.router)
+    app.include_router(disputes.router)
+    app.include_router(feedback_router)
+
+    # Root health check endpoint (simple and fast)
+    @app.get("/")
+    async def root():
+        return JSONResponse({"status": "ok", "message": "ContractGuard API is running"})
+
+    @app.get("/health")
+    async def health():
+        return JSONResponse({"status": "ok", "message": "ContractGuard API is healthy"})
 
     return app
 
