@@ -165,6 +165,7 @@ class Job:
     status: str = "queued"
     message: Optional[str] = None
     customer_id: Optional[str] = None
+    user_type: str = "customer"  # "customer" or "vendor" - determines perspective
     metrics: Dict[str, Any] = field(default_factory=dict)
     stages: List[Dict[str, Any]] = field(default_factory=list)
     contracts: List[Dict[str, Any]] = field(default_factory=list)

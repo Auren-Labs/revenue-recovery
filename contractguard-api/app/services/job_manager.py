@@ -33,8 +33,8 @@ def _check_celery_available():
         process_audit_job = None
         return False
 
-def create_job(vendor_name: str, organization_id: str | None) -> Job:
-    return job_repository.create_job_record(vendor_name, organization_id)
+def create_job(vendor_name: str, organization_id: str | None, user_type: str = "customer") -> Job:
+    return job_repository.create_job_record(vendor_name, organization_id, user_type)
 
 
 def get_job(job_id: str, organization_id: str | None = None) -> Job | None:

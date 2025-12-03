@@ -10,6 +10,7 @@ import Upload from "./pages/Upload";
 import Login from "./pages/Login";
 import AuditHistory from "./pages/AuditHistory";
 import Settings from "./pages/Settings";
+import Artifact from "./pages/Artifact";
 import NotFound from "./pages/NotFound";
 import ProtectedRoute from "./components/ProtectedRoute";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -64,6 +65,16 @@ const App = () => (
                   <ProtectedRoute>
                     <ErrorBoundary>
                       <Settings />
+                    </ErrorBoundary>
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/artifact"
+                element={
+                  <ProtectedRoute>
+                    <ErrorBoundary>
+                      <Artifact />
                     </ErrorBoundary>
                   </ProtectedRoute>
                 }

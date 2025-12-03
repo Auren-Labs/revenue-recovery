@@ -39,6 +39,20 @@ def _format_currency(amount: float, currency: str = "INR") -> str:
         return f"{amount:,.2f} {currency}"
 
 
+def _get_document_type(user_type: str) -> str:
+    """Return appropriate document type based on user perspective."""
+    if user_type == "vendor":
+        return "corrective_invoice"
+    return "dispute_letter"
+
+
+def _get_subject_line(user_type: str, invoice_ref: str, issue: str) -> str:
+    """Generate appropriate subject line based on user type."""
+    if user_type == "vendor":
+        return f"Billing Correction Notice - Invoice {invoice_ref}"
+    return f"Billing Discrepancy - Invoice {invoice_ref}"
+
+
 def _extract_contract_evidence(discrepancy: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Extract contract evidence from discrepancy."""
     evidence = []
@@ -56,9 +70,10 @@ def _extract_contract_evidence(discrepancy: Dict[str, Any]) -> List[Dict[str, An
 def _build_dispute_letter_prompt(
     discrepancy: Dict[str, Any],
     job: Any,
-    vendor_contact: Optional[str] = None
+    vendor_contact: Optional[str] = None,
+    user_type: str = "customer"
 ) -> str:
-    """Build prompt for dispute letter generation."""
+    """Build prompt for dispute letter or corrective invoice generation."""
     
     issue = discrepancy.get("issue", "Billing discrepancy")
     value = discrepancy.get("value", 0)
@@ -79,7 +94,60 @@ def _build_dispute_letter_prompt(
     confidence = discrepancy.get("confidence", 0)
     finding_status = discrepancy.get("finding_status", "needs_review")
     
-    prompt = f"""Generate a professional, courteous dispute letter for a billing discrepancy.
+    is_vendor = user_type == "vendor"
+    
+    if is_vendor:
+        # Vendor mode: Generate corrective invoice/billing adjustment notice
+        prompt = f"""Generate a professional billing correction notice (corrective invoice) for revenue recovery.
+
+BILLING CORRECTION DETAILS:
+- Issue: {issue}
+- Original Invoice Date: {invoice_date or "N/A"}
+- Original Invoice Number: {invoice_reference}
+- Under-billed Amount: {_format_currency(value, currency)}
+- Customer: {customer}
+- Vendor: {job.vendor_name}
+- Confidence Level: {confidence:.0%} ({finding_status})
+
+CONTRACT EVIDENCE:
+{evidence_text if evidence_text else "Contract terms support this correction."}
+
+CUSTOMER CONTACT: {vendor_contact or "accounts@customer.com"}
+
+REQUIREMENTS:
+1. Professional and clear tone
+2. Clear statement of the billing correction needed
+3. Reference to contract terms that justify the correction
+4. Request for payment/adjustment
+5. Offer to provide supporting documentation
+6. Professional closing
+
+Generate the billing correction notice in the following format:
+
+Subject: Billing Correction Notice - Invoice {invoice_reference}
+
+Dear [Customer Accounts Team],
+
+[Opening paragraph - introduce the billing correction]
+
+CORRECTION DETAILS:
+[Bullet points with specific details about what was under-billed]
+
+CONTRACT REFERENCE:
+[Reference to relevant contract terms that justify the correction]
+
+REQUEST:
+[Clear request for payment/adjustment of the under-billed amount]
+
+[Closing paragraph - offer to provide documentation and answer questions]
+
+Best regards,
+[{job.vendor_name} Billing Team]
+
+Generate the notice now:"""
+    else:
+        # Customer mode: Generate dispute letter
+        prompt = f"""Generate a professional, courteous dispute letter for a billing discrepancy.
 
 DISCREPANCY DETAILS:
 - Issue: {issue}
@@ -137,13 +205,13 @@ async def generate_dispute_letter(
     vendor_contact: Optional[str] = None
 ) -> Dict[str, Any]:
     """
-    Generate a dispute letter for a discrepancy.
+    Generate a dispute letter (customer) or corrective invoice (vendor) for a discrepancy.
     
     Args:
         job_id: Job ID
         discrepancy_id: Discrepancy ID or index
         customer_id: Customer ID for rate limiting
-        vendor_contact: Optional vendor contact email
+        vendor_contact: Optional vendor/customer contact email
         
     Returns:
         Dict with letter content, metadata, and attachments info
@@ -152,6 +220,9 @@ async def generate_dispute_letter(
     job = job_manager.get_job(job_id, customer_id)
     if not job:
         raise ValueError(f"Job {job_id} not found")
+    
+    # Get user_type from job
+    user_type = getattr(job, 'user_type', 'customer')
     
     # Find discrepancy
     discrepancy = None
@@ -186,8 +257,18 @@ async def generate_dispute_letter(
             logger.warning(f"Rate limit hit: {error_msg}")
             raise Exception(f"Rate limit exceeded: {error_msg}")
     
-    # Build prompt
-    prompt = _build_dispute_letter_prompt(discrepancy, job, vendor_contact)
+    # Build prompt with user_type
+    prompt = _build_dispute_letter_prompt(discrepancy, job, vendor_contact, user_type=user_type)
+    
+    # Determine document type and system message
+    document_type = _get_document_type(user_type)
+    is_vendor = user_type == "vendor"
+    
+    system_message = (
+        "You are a professional business communication assistant. Generate clear, courteous, and professional "
+        "billing correction notices for revenue recovery." if is_vendor else
+        "You are a professional business communication assistant. Generate clear, courteous, and professional dispute letters."
+    )
     
     # Generate letter
     letter_content = ""
@@ -202,7 +283,7 @@ async def generate_dispute_letter(
                     messages=[
                         {
                             "role": "system",
-                            "content": "You are a professional business communication assistant. Generate clear, courteous, and professional dispute letters."
+                            "content": system_message
                         },
                         {"role": "user", "content": prompt}
                     ],
@@ -212,11 +293,27 @@ async def generate_dispute_letter(
             )
             letter_content = response.choices[0].message.content.strip()
         except Exception as e:
-            logger.error(f"Failed to generate dispute letter: {e}")
-            raise Exception(f"Failed to generate letter: {str(e)}")
+            logger.error(f"Failed to generate {document_type}: {e}")
+            raise Exception(f"Failed to generate {document_type}: {str(e)}")
     else:
-        # Fallback template
-        letter_content = f"""Subject: Billing Discrepancy - Invoice {discrepancy.get('invoice_reference', 'N/A')}
+        # Fallback template - mode-aware
+        if is_vendor:
+            letter_content = f"""Subject: Billing Correction Notice - Invoice {discrepancy.get('invoice_reference', 'N/A')}
+
+Dear Accounts Team,
+
+We have identified a billing correction needed for invoice {discrepancy.get('invoice_reference', 'N/A')} dated {discrepancy.get('invoice_date', 'N/A')}.
+
+CORRECTION DETAILS:
+- Issue: {discrepancy.get('issue', 'Under-billing error')}
+- Under-billed Amount: {_format_currency(discrepancy.get('value', 0), job.metrics.get('currency', 'INR'))}
+
+We request payment or adjustment for this under-billed amount per our contract terms. Please let us know if you need any additional documentation.
+
+Best regards,
+{job.vendor_name} Billing Team"""
+        else:
+            letter_content = f"""Subject: Billing Discrepancy - Invoice {discrepancy.get('invoice_reference', 'N/A')}
 
 Dear Accounts Team,
 
@@ -237,15 +334,19 @@ Customer Accounts Team"""
     
     return {
         "letter": letter_content,
+        "document_type": document_type,
         "metadata": {
             "job_id": job_id,
             "discrepancy_id": discrepancy_id,
             "vendor": job.vendor_name,
+            "customer": discrepancy.get("customer"),
             "amount": value,
             "currency": currency,
             "invoice_date": discrepancy.get("invoice_date"),
             "invoice_reference": discrepancy.get("invoice_reference"),
             "generated_at": datetime.utcnow().isoformat(),
+            "user_type": user_type,
+            "subject": _get_subject_line(user_type, discrepancy.get("invoice_reference", "N/A"), discrepancy.get("issue", "")),
         },
         "attachments": {
             "contract_evidence": _extract_contract_evidence(discrepancy),

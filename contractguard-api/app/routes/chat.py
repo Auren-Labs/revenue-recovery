@@ -74,3 +74,4 @@ async def query_contracts(
         raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
 
 
+

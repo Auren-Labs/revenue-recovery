@@ -35,6 +35,8 @@ async def analysis_summary(job_id: str, current_user=Depends(require_user)) -> A
         message=job.message,
         stages=job.stages,
         metrics=job.metrics,
+        vendor_name=job.vendor_name,
+        user_type=getattr(job, 'user_type', 'customer'),
     )
     return AnalysisSummary(job=job_status, discrepancies=job.discrepancies)
 

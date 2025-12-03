@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from pathlib import Path
 
-from app.routes import upload, analysis, files, auth, export, chat, disputes
+from app.routes import upload, analysis, files, auth, export, chat, disputes, renewals
 from app.middleware.rate_limit import RateLimitMiddleware
 from app.routes.feedback import router as feedback_router
 
@@ -44,6 +44,7 @@ def create_app() -> FastAPI:
     app.include_router(chat.router)
     app.include_router(disputes.router)
     app.include_router(feedback_router)
+    app.include_router(renewals.router, prefix="/renewals", tags=["renewals"])
 
     # Root health check endpoint (simple and fast)
     @app.get("/")

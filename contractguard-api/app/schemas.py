@@ -24,6 +24,8 @@ class JobStatus(BaseModel):
     metrics: dict = Field(default_factory=dict)
     progress: Optional[int] = Field(None, ge=0, le=100, description="Progress percentage (0-100)")
     progress_message: Optional[str] = Field(None, description="Current progress message")
+    vendor_name: Optional[str] = Field(None, description="Name of the vendor being audited")
+    user_type: Optional[str] = Field("customer", description="Perspective: 'customer' or 'vendor'")
 
 
 class AnalysisSummary(BaseModel):

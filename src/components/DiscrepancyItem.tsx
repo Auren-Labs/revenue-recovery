@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ConfidenceBreakdown } from "@/components/ConfidenceBreakdown";
 import { FindingStatusBadge } from "@/components/FindingStatusBadge";
+import { FileText, Sparkles, ArrowRight } from "lucide-react";
 
 type DiscrepancyItemProps = {
   discrepancy: {
@@ -42,6 +43,9 @@ type DiscrepancyItemProps = {
   formatCurrency: (value: number, currency: string) => string;
   contractCurrency: string;
   onViewAuditTrail?: (discrepancy: any) => void;
+  onClick?: (discrepancy: any) => void;
+  onOpenSplitView?: (discrepancy: any) => void;
+  onOpenArtifact?: (discrepancy: any) => void;
 };
 
 export const DiscrepancyItem = ({
@@ -49,11 +53,17 @@ export const DiscrepancyItem = ({
   formatCurrency,
   contractCurrency,
   onViewAuditTrail,
+  onClick,
+  onOpenSplitView,
+  onOpenArtifact,
 }: DiscrepancyItemProps) => {
   const [showConfidenceDialog, setShowConfidenceDialog] = useState(false);
 
   return (
-    <div className="text-sm py-2 border-b border-border/30 last:border-0">
+    <div 
+      className={`text-sm py-2 border-b border-border/30 last:border-0 ${onClick ? 'cursor-pointer hover:bg-secondary/30 rounded px-2 transition-colors' : ''}`}
+      onClick={() => onClick?.(disc)}
+    >
       <div className="flex justify-between items-center">
         <div className="flex-1">
           <div className="flex items-center gap-2 flex-wrap">
@@ -87,9 +97,27 @@ export const DiscrepancyItem = ({
                       variant="ghost"
                       size="sm"
                       className="h-6 text-xs"
-                      onClick={() => onViewAuditTrail(disc)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onViewAuditTrail(disc);
+                      }}
                     >
                       Audit Trail
+                    </Button>
+                  )}
+                  {onOpenArtifact && (
+                    <Button
+                      variant="default"
+                      size="sm"
+                      className="h-6 text-xs bg-gradient-to-r from-primary to-primary/90 hover:from-primary/90 hover:to-primary/80"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenArtifact(disc);
+                      }}
+                    >
+                      <Sparkles className="h-3 w-3 mr-1" />
+                      Open as Artifact
+                      <ArrowRight className="h-3 w-3 ml-1" />
                     </Button>
                   )}
                 </>
@@ -112,7 +140,34 @@ export const DiscrepancyItem = ({
         <Dialog open={showConfidenceDialog} onOpenChange={setShowConfidenceDialog}>
           <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
             <DialogHeader>
-              <DialogTitle>Confidence Breakdown</DialogTitle>
+              <div className="flex items-center justify-between">
+                <DialogTitle>Confidence Breakdown</DialogTitle>
+                {disc.evidence?.some((item: any) => item.type === "invoice_line_error") &&
+                 disc.evidence?.some((item: any) => item.type === "contract_clause") &&
+                 onOpenSplitView && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      const invoiceEvidence = disc.evidence?.find(
+                        (item: any) => item.type === "invoice_line_error"
+                      );
+                      const contractEvidence = disc.evidence?.find(
+                        (item: any) => item.type === "contract_clause"
+                      );
+                      if (invoiceEvidence && contractEvidence) {
+                        setShowConfidenceDialog(false);
+                        setTimeout(() => {
+                          onOpenSplitView(disc);
+                        }, 200);
+                      }
+                    }}
+                  >
+                    <FileText className="h-4 w-4 mr-2" />
+                    Split View
+                  </Button>
+                )}
+              </div>
             </DialogHeader>
             <div className="mt-4">
               <ConfidenceBreakdown

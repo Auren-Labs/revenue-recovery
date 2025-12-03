@@ -142,7 +142,10 @@ Extract the following information with HIGH PRECISION. Return ONLY valid JSON, n
     "service_credits": <boolean>,
     "service_credit_rate": <percentage or null>,
     "payment_terms": "<net 30, etc>",
-    "renewal_notice_days": <number or null>
+    "renewal_notice_days": <number or null>,
+    "termination_date": "<YYYY-MM-DD - contract end/expiry date or null>",
+    "renewal_date": "<YYYY-MM-DD - next renewal date or null>",
+    "contract_duration": "<number of months/years or null>"
   }},
   "extraction_confidence": {{
     "overall": <0.0 to 1.0>,

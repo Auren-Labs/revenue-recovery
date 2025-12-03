@@ -28,8 +28,9 @@ import {
   ChevronUp,
   FileEdit,
   FileText as FileTextIcon,
+  Coins,
 } from "lucide-react";
-import { getAuthHeader, logout } from "@/utils/auth";
+import { getAuthHeader, logout, getCurrentUser } from "@/utils/auth";
 import { ChartStyle, ChartConfig } from "@/components/ui/chart";
 import {
   Area,
@@ -43,12 +44,21 @@ import {
   YAxis,
 } from "recharts";
 import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { useSearchParams } from "react-router-dom";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetPortal, SheetOverlay } from "@/components/ui/sheet";
+import * as SheetPrimitive from "@radix-ui/react-dialog";
 import { Document as PdfDocument, Page as PdfPage, pdfjs } from "react-pdf";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogPortal } from "@/components/ui/dialog";
+import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Tooltip,
@@ -69,8 +79,18 @@ import { EmptyState } from "@/components/EmptyState";
 import { DashboardSkeleton } from "@/components/LoadingSkeleton";
 import { CustomerDrillDown } from "@/components/CustomerDrillDown";
 import { PricingTimeline } from "@/components/PricingTimeline";
-import { HelpCircle, Upload, FileSearch, CheckCircle2, History as HistoryIcon, Download, FileDown, Settings } from "lucide-react";
+import { HelpCircle, Upload, FileSearch, CheckCircle2, History as HistoryIcon, Download, FileDown, Settings, User, LogOut, Wallet, Flame, X, Clock } from "lucide-react";
 import { useToast } from "@/components/ui/use-toast";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 
 if (pdfjs?.GlobalWorkerOptions) {
   pdfjs.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
@@ -190,6 +210,7 @@ type AnalysisSummary = {
     id: string;
     status: string;
     vendor_name?: string;
+    user_type?: string;
     metrics: JobMetrics;
   };
   discrepancies: Array<{
@@ -379,6 +400,28 @@ const Dashboard = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedRange, setSelectedRange] = useState("Last 6 months");
+  const user = getCurrentUser();
+  
+  // Stats for ticker - fetched from API
+  const [stats, setStats] = useState({
+    audits: 0,
+    recovered: 0,
+    avgSavings: 0,
+    loading: true,
+  });
+  
+  // Renewal intelligence state
+  const [upcomingRenewals, setUpcomingRenewals] = useState<Array<{
+    job_id: string;
+    vendor_name: string;
+    termination_date: string;
+    days_until_renewal: number;
+    recoverable_amount: number;
+    currency: string;
+    user_type: string;
+    latest_alert?: any;
+  }>>([]);
+  const [renewalsLoading, setRenewalsLoading] = useState(false);
   const [openEvidenceKey, setOpenEvidenceKey] = useState<string | null>(null);
   const [viewerClause, setViewerClause] = useState<{ doc: ExtractedDocument; evidence: DiscrepancyEvidence } | null>(
     null,
@@ -405,6 +448,8 @@ const Dashboard = () => {
     sources?: Array<{ text?: string; source_type?: string; reference?: string }>;
   };
   const [chatOpen, setChatOpen] = useState(false);
+  const [artifactOpen, setArtifactOpen] = useState(false);
+  const [selectedDiscrepancyForArtifact, setSelectedDiscrepancyForArtifact] = useState<any | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     {
       id: generateMessageId(),
@@ -422,6 +467,98 @@ const Dashboard = () => {
   } | null>(null);
   const [auditTrailOpen, setAuditTrailOpen] = useState(false);
   const [selectedDiscrepancyForAudit, setSelectedDiscrepancyForAudit] = useState<any>(null);
+  const [splitViewOpen, setSplitViewOpen] = useState(false);
+  const [splitViewData, setSplitViewData] = useState<{
+    discrepancy: any;
+    invoiceEvidence: any;
+    contractEvidence: any;
+  } | null>(null);
+  const [splitViewPdfBlobUrl, setSplitViewPdfBlobUrl] = useState<string | null>(null);
+  const [splitViewPdfScale, setSplitViewPdfScale] = useState(1.5);
+  const [splitViewAutoScale, setSplitViewAutoScale] = useState(1.5);
+  const [splitViewDimensions, setSplitViewDimensions] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+
+  // Fetch stats for ticker (last 30 days)
+  useEffect(() => {
+    const fetchStats = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/upload/history?limit=100`, {
+          headers: getAuthHeader(),
+        });
+        
+        if (!response.ok) {
+          throw new Error("Failed to fetch audit history");
+        }
+        
+        const data = await response.json();
+        const jobs = data.jobs || [];
+        
+        // Calculate stats for last 30 days
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+        
+        const recentJobs = jobs.filter((job: any) => {
+          const jobDate = new Date(job.created_at);
+          return jobDate >= thirtyDaysAgo && job.status === "completed";
+        });
+        
+        const totalRecovered = recentJobs.reduce((sum: number, job: any) => {
+          return sum + (job.recoverable_amount || 0);
+        }, 0);
+        
+        const totalBilled = recentJobs.reduce((sum: number, job: any) => {
+          return sum + (job.total_billed || 0);
+        }, 0);
+        
+        const avgSavings = totalBilled > 0 
+          ? parseFloat(((totalRecovered / totalBilled) * 100).toFixed(1))
+          : 0;
+        
+        setStats({
+          audits: recentJobs.length,
+          recovered: totalRecovered,
+          avgSavings: avgSavings,
+          loading: false,
+        });
+      } catch (err) {
+        console.error("Failed to fetch stats:", err);
+        setStats(prev => ({ ...prev, loading: false }));
+      }
+    };
+    
+    fetchStats();
+  }, []);
+
+  // Fetch upcoming renewals
+  useEffect(() => {
+    const fetchUpcomingRenewals = async () => {
+      setRenewalsLoading(true);
+      try {
+        const response = await fetch(`${API_BASE}/renewals/upcoming?limit=5`, {
+          headers: getAuthHeader(),
+        });
+        
+        if (!response.ok) {
+          if (response.status === 401 || response.status === 403) {
+            // User not authenticated or no access - silently fail
+            setUpcomingRenewals([]);
+            return;
+          }
+          throw new Error("Failed to fetch upcoming renewals");
+        }
+        
+        const data = await response.json();
+        setUpcomingRenewals(data.renewals || []);
+      } catch (err) {
+        console.error("Failed to fetch upcoming renewals:", err);
+        setUpcomingRenewals([]);
+      } finally {
+        setRenewalsLoading(false);
+      }
+    };
+    
+    fetchUpcomingRenewals();
+  }, []);
 
   useEffect(() => {
     if (!jobId) {
@@ -471,6 +608,57 @@ const Dashboard = () => {
   const displayRecoverable = Math.max(0, recoverableAmount);
   const hasPositiveLeakage = recoverableAmount > 0;
   const isNoLeakage = recoverableAmount <= 0;
+  
+  // Calculate annualized impact from RECURRING discrepancies
+  const annualizedImpact = useMemo(() => {
+    if (!discrepancies.length || recoverableAmount <= 0) return 0;
+    
+    // Filter discrepancies that are RECURRING based on:
+    // 1. Invoice line item classification in evidence
+    // 2. Discrepancy type (escalation, discount_drift are typically recurring)
+    // 3. Issue description keywords
+    const recurringDiscrepancies = discrepancies.filter((disc) => {
+      // Check evidence array for invoice line items with RECURRING classification
+      const invoiceLineEvidence = disc.evidence?.filter(
+        (ev: any) => ev.type === "invoice_line_error" && ev.classification
+      ) || [];
+      
+      // Check if any invoice line item is classified as RECURRING or RECURRING_FIXED
+      const hasRecurring = invoiceLineEvidence.some((ev: any) => {
+        const classification = (ev.classification || "").toUpperCase();
+        return classification.includes("RECURRING");
+      });
+      
+      // Check discrepancy type - these are typically recurring issues
+      // Note: type might be in the issue description or we infer from issue text
+      const recurringTypes = ["escalation", "discount_drift", "renewal_uplift"];
+      const discType = (disc as any).type || "";
+      const isRecurringType = recurringTypes.includes(discType.toLowerCase());
+      
+      // Check issue description for recurring keywords
+      const issueText = (disc.issue || "").toLowerCase();
+      const hasRecurringKeywords = 
+        issueText.includes("recurring") ||
+        issueText.includes("escalation") ||
+        issueText.includes("monthly") ||
+        issueText.includes("annual") ||
+        issueText.includes("subscription") ||
+        issueText.includes("renewal");
+      
+      return hasRecurring || isRecurringType || hasRecurringKeywords;
+    });
+    
+    if (recurringDiscrepancies.length === 0) return 0;
+    
+    // Calculate total monthly recurring loss from recurring discrepancies
+    const monthlyRecurringLoss = recurringDiscrepancies.reduce((sum, disc) => {
+      return sum + (disc.value || 0);
+    }, 0);
+    
+    // Annualize: multiply by 12 months
+    // This shows the potential annual cost if the recurring issue continues
+    return monthlyRecurringLoss * 12;
+  }, [discrepancies, recoverableAmount]);
   
   // Deduplicate documents by filename to avoid showing duplicates
   // (same file might appear with different storage paths - local vs supabase)
@@ -563,6 +751,45 @@ const Dashboard = () => {
     viewerClause?.evidence.page ||
     viewerClause?.doc.clauses?.find((clause) => clause.file === viewerClause?.doc.filename)?.page ||
     1;
+  
+  // Load PDF when split view opens
+  useEffect(() => {
+    if (!splitViewOpen || !splitViewData?.contractEvidence?.file || !jobId) {
+      if (splitViewPdfBlobUrl) {
+        URL.revokeObjectURL(splitViewPdfBlobUrl);
+        setSplitViewPdfBlobUrl(null);
+      }
+      return;
+    }
+    
+    const contractDoc = documents.find((d) => d.filename === splitViewData.contractEvidence.file);
+    if (!contractDoc) return;
+    
+    const contractUrl = `${API_BASE}/jobs/${jobId}/contracts/${encodeURIComponent(contractDoc.filename)}`;
+    
+    // Fetch PDF as blob
+    fetch(contractUrl, { headers: getAuthHeader() })
+      .then((res) => {
+        if (!res.ok) throw new Error(`Failed to fetch PDF: ${res.statusText}`);
+        return res.blob();
+      })
+      .then((blob) => {
+        const url = URL.createObjectURL(blob);
+        setSplitViewPdfBlobUrl(url);
+      })
+      .catch((err) => {
+        console.error("Failed to load PDF for split view:", err);
+        toast({
+          title: "Failed to load PDF",
+          description: err.message || "Could not load the contract file.",
+          variant: "destructive",
+        });
+      });
+    
+    return () => {
+      // Cleanup will happen when splitViewOpen changes
+    };
+  }, [splitViewOpen, splitViewData?.contractEvidence?.file, jobId, documents, toast]);
 
   const openClauseReference = (reference: DiscrepancyEvidence) => {
     if (!jobId || reference.type !== "contract_clause") return;
@@ -664,31 +891,44 @@ const Dashboard = () => {
     
     const hasIssues = discrepancies.length > 0;
     
+    const isVendor = analysis?.job.user_type === "vendor";
+    
     return [
       {
-        label: "Active escalations",
+        label: isVendor ? "Active undercharges" : "Active overcharges",
         value: hasIssues 
           ? `${discrepancies.length} ${discrepancies.length === 1 ? 'issue' : 'issues'}` 
           : "All clear",
         delta: hasIssues
-          ? `${formatCurrency(recoverableAmount, contractCurrency)} at risk`
-          : "No leakage detected",
+          ? isVendor
+            ? `${formatCurrency(recoverableAmount, contractCurrency)} in lost revenue`
+            : `${formatCurrency(recoverableAmount, contractCurrency)} to recover`
+          : isVendor
+            ? "No revenue leakage detected"
+            : "No billing errors detected",
         trend: hasIssues ? "⚠️ Action required" : "✓ Healthy",
         icon: AlertTriangle,
         priority: "critical",
         actionable: true,
       },
       {
-        label: "Recoverable revenue",
+        label: isVendor ? "Revenue leakage" : "Recoverable revenue",
         value: formatCurrency(recoverableAmount, contractCurrency),
-        delta: `${billingSummary.invoice_count ?? 0} invoices audited`,
+        delta: annualizedImpact > 0 
+          ? isVendor
+            ? `Potential annual loss: ${formatCurrency(annualizedImpact, contractCurrency)}`
+            : `Potential annual saving: ${formatCurrency(annualizedImpact, contractCurrency)}`
+          : `${billingSummary.invoice_count ?? 0} invoices audited`,
         trend: (() => {
-          if (!hasIssues) return "✓ No leakage";
+          if (!hasIssues) return isVendor ? "✓ No leakage" : "✓ No errors";
+          if (annualizedImpact > 0) {
+            return `📈 ${formatCurrency(annualizedImpact / 12, contractCurrency)}/mo ${isVendor ? 'recurring loss' : 'recurring'}`;
+          }
           const totalBilled = billingSummary.total_billed || 1;
-          const leakagePercentage = (recoverableAmount / totalBilled) * 100;
-          if (leakagePercentage > 5) return `⚠️ ${leakagePercentage.toFixed(1)}% of total billed`;
-          if (leakagePercentage > 2) return `↑ ${leakagePercentage.toFixed(1)}% leakage rate`;
-          return `→ ${leakagePercentage.toFixed(1)}% leakage rate`;
+          const percentage = (recoverableAmount / totalBilled) * 100;
+          if (percentage > 5) return `⚠️ ${percentage.toFixed(1)}% of total billed`;
+          if (percentage > 2) return `↑ ${percentage.toFixed(1)}% ${isVendor ? 'leakage rate' : 'error rate'}`;
+          return `→ ${percentage.toFixed(1)}% ${isVendor ? 'leakage rate' : 'error rate'}`;
         })(),
         icon: Zap,
         priority: "high",
@@ -726,7 +966,7 @@ const Dashboard = () => {
         actionable: false,
       },
     ];
-  }, [analysis, billingSummary, clauseHits, discrepancies.length, metrics.llm_insights, recoverableAmount, contractCurrency]);
+  }, [analysis, billingSummary, clauseHits, discrepancies, discrepancies.length, metrics.llm_insights, recoverableAmount, contractCurrency, annualizedImpact]);
 
   const leakageTrend = useMemo(() => {
     const categorize = (issue?: string) => {
@@ -798,12 +1038,21 @@ const Dashboard = () => {
     return monthBuckets;
   }, [discrepancies]);
 
-  // Group discrepancies by customer
+  // Group discrepancies by customer/vendor based on mode
   const groupedDiscrepancies = useMemo(() => {
     if (!analysis || !discrepancies.length) return [];
     
+    const isVendor = analysis.job.user_type === "vendor";
+    
     const grouped = discrepancies.reduce((acc, disc) => {
-      const customer = disc.customer || "Unknown Customer";
+      // For customers: group by vendor (disc.customer is the vendor name from invoice)
+      // For vendors: group by customer (disc.customer is the customer name from invoice)
+      // Fallback to job.vendor_name for customers if disc.customer is missing
+      const groupKey = isVendor 
+        ? (disc.customer || "Unknown Customer")
+        : (disc.customer || analysis.job.vendor_name || "Unknown Vendor");
+      
+      const customer = groupKey;
       
       if (!acc[customer]) {
         acc[customer] = {
@@ -874,7 +1123,9 @@ const Dashboard = () => {
         {
           id: "all-clear",
           customer: "All clear",
-          issue: "No discrepancies detected in this run.",
+          issue: analysis?.job.user_type === "vendor" 
+            ? "No revenue leakage detected in this run."
+            : "No overcharges detected in this run.",
           value: "$0",
           due: "You're in great shape",
           priority: "low",
@@ -883,8 +1134,8 @@ const Dashboard = () => {
       ];
     }
     return discrepancies.map((alert, idx) => ({
-      id: `${alert.customer ?? "unknown"}-${alert.invoice_date ?? idx}-${idx}`,
-      customer: alert.customer ?? "Unknown customer",
+      id: `${analysis?.job.vendor_name ?? alert.customer ?? "unknown"}-${alert.invoice_date ?? idx}-${idx}`,
+      customer: analysis?.job.vendor_name ?? alert.customer ?? "Unknown vendor",
       issue: alert.issue ?? "Issue pending triage",
       value: formatCurrency(alert.value ?? 0, contractCurrency),
       due: alert.due ?? "Needs review",
@@ -1062,9 +1313,55 @@ const chartFriendlyLabel = {
                 <Settings className="h-4 w-4 mr-2" />
                 Settings
               </Button>
-              <Button variant="ghost" size="sm" onClick={handleLogout}>
-                Logout
-              </Button>
+              
+              {/* Avatar dropdown - Top right */}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button className="flex items-center gap-2 rounded-full border border-border/50 bg-card/50 backdrop-blur-sm p-1.5 hover:bg-card/80 transition-colors">
+                    <Avatar className="h-8 w-8">
+                      <AvatarImage src="" alt={user?.full_name || "User"} />
+                      <AvatarFallback className="bg-primary/10 text-primary text-sm font-semibold">
+                        {user?.full_name?.charAt(0).toUpperCase() || "U"}
+                      </AvatarFallback>
+                    </Avatar>
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-56">
+                  <DropdownMenuLabel>
+                    <div className="flex flex-col space-y-1">
+                      <p className="text-sm font-medium">{user?.full_name || "User"}</p>
+                      <p className="text-xs text-muted-foreground">{user?.email || ""}</p>
+                    </div>
+                  </DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => navigate("/history")}>
+                    <HistoryIcon className="mr-2 h-4 w-4" />
+                    <span>Audit History</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => navigate("/settings")}>
+                    <Settings className="mr-2 h-4 w-4" />
+                    <span>Settings</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem>
+                    <Calendar className="mr-2 h-4 w-4" />
+                    <span>Schedule monthly audit</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem>
+                    <Users className="mr-2 h-4 w-4" />
+                    <span>Invite team</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem className="text-success">
+                    <Flame className="mr-2 h-4 w-4" />
+                    <span>Recovery streak: 11 months</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={handleLogout} className="text-destructive">
+                    <LogOut className="mr-2 h-4 w-4" />
+                    <span>Log out</span>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
           </div>
         </div>
@@ -1080,107 +1377,325 @@ const chartFriendlyLabel = {
             Upload a contract + billing run to see live metrics here. Showing sample data until a job is provided.
           </div>
         )}
-        <header className="flex flex-col gap-6 md:flex-row md:items-center md:justify-between pb-4">
-          <div className="space-y-2">
-            <p className="text-sm font-semibold uppercase tracking-[0.3em] text-primary/80">Operations cockpit</p>
-            <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-foreground via-foreground/95 to-foreground/80 bg-clip-text text-transparent">
-              ContractGuard Dashboard
-            </h1>
-            <p className="text-muted-foreground max-w-2xl leading-relaxed">
-              Monitor automated audits, review AI insights, and dispatch revenue recovery workstreams—all in one place.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-3 items-center">
-            <select
-              className="h-10 rounded-lg border border-border bg-card px-3 text-sm text-foreground"
-              value={selectedRange}
-              onChange={(event) => setSelectedRange(event.target.value)}
+        {/* Header with animated background */}
+        <header className="relative flex flex-col gap-8 md:flex-row md:items-start md:justify-between pb-6 overflow-hidden rounded-2xl p-8 -mx-4 sm:mx-0">
+          {/* Animated background - subtle mesh gradient */}
+          <motion.div
+            className="absolute inset-0 opacity-30 pointer-events-none"
+            animate={{
+              background: [
+                "radial-gradient(circle at 0% 0%, hsl(var(--primary)/0.1) 0%, transparent 50%)",
+                "radial-gradient(circle at 100% 100%, hsl(var(--primary)/0.1) 0%, transparent 50%)",
+                "radial-gradient(circle at 0% 0%, hsl(var(--primary)/0.1) 0%, transparent 50%)",
+              ],
+            }}
+            transition={{
+              duration: 8,
+              repeat: Infinity,
+              ease: "easeInOut",
+            }}
+          />
+          
+          <div className="relative z-10 flex-1 space-y-6">
+            <div className="space-y-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.3em] text-primary/70">Operations cockpit</p>
+              <h1 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-foreground via-foreground/95 to-foreground/80 bg-clip-text text-transparent leading-tight">
+                ContractGuard Dashboard
+              </h1>
+            </div>
+            
+            {/* Elegant stats ticker - mode-aware */}
+            <motion.div
+              className="inline-flex items-center gap-6 px-4 py-3 rounded-xl border border-border/50 bg-card/40 backdrop-blur-sm"
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.2 }}
             >
-              {dateRanges.map((range) => (
-                <option key={range} value={range}>
-                  {range}
-                </option>
-              ))}
-            </select>
-            {jobId && analysis?.job.status === "completed" && (
-              <>
-                <Button
-                  variant="secondary"
+              {stats.loading ? (
+                <span className="text-sm text-muted-foreground">Loading stats...</span>
+              ) : stats.audits > 0 ? (
+                <>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs uppercase tracking-wider text-muted-foreground/70">Last 30 days</span>
+                  </div>
+                  <div className="h-4 w-px bg-border/50" />
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-lg font-semibold text-foreground">{stats.audits}</span>
+                    <span className="text-sm text-muted-foreground">audit{stats.audits !== 1 ? 's' : ''}</span>
+                  </div>
+                  <div className="h-4 w-px bg-border/50" />
+                  <div className="flex items-center gap-1.5">
+                    <span className={`text-lg font-semibold ${
+                      analysis?.job.user_type === "vendor" ? "text-cta" : "text-success"
+                    }`}>
+                      {formatCurrency(stats.recovered, contractCurrency)}
+                    </span>
+                    <span className="text-sm text-muted-foreground">
+                      {analysis?.job.user_type === "vendor" ? "identifiable" : "recovered"}
+                    </span>
+                  </div>
+                  {stats.avgSavings > 0 && (
+                    <>
+                      <div className="h-4 w-px bg-border/50" />
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-lg font-semibold text-primary">{stats.avgSavings}%</span>
+                        <span className="text-sm text-muted-foreground">
+                          {analysis?.job.user_type === "vendor" ? "avg leakage" : "avg savings"}
+                        </span>
+                      </div>
+                    </>
+                  )}
+                </>
+              ) : (
+                <span className="text-sm text-muted-foreground">No audits in the last 30 days</span>
+              )}
+            </motion.div>
+          </div>
+          
+          <div className="relative z-10 flex flex-col gap-4 items-start md:items-end">
+            {/* Date range selector - elegant dropdown */}
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-muted-foreground/70 uppercase tracking-wider font-medium">Time range</span>
+              <Select value={selectedRange} onValueChange={setSelectedRange}>
+                <SelectTrigger className="h-9 w-[140px] border-border/60 bg-card/80 backdrop-blur-sm text-sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {dateRanges.map((range) => (
+                    <SelectItem key={range} value={range}>
+                      {range}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            
+            {/* Action buttons - grouped elegantly */}
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Export buttons - only show when job is completed */}
+              {jobId && analysis?.job.status === "completed" && (
+                <>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="gap-2 h-9 border-border/60 bg-card/60 hover:bg-card/80"
+                    onClick={() => handleExport("discrepancies")}
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    <span className="text-xs">CSV</span>
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="gap-2 h-9 border-border/60 bg-card/60 hover:bg-card/80"
+                    onClick={() => handleExport("report")}
+                  >
+                    <FileDown className="h-3.5 w-3.5" />
+                    <span className="text-xs">
+                      {analysis?.job.user_type === "vendor" ? "Leakage" : "Recovery"}
+                    </span>
+                  </Button>
+                  <div className="h-6 w-px bg-border/40 mx-1" />
+                </>
+              )}
+              
+              {/* Schedule audit */}
+              <Button 
+                variant="outline" 
+                size="sm"
+                className="gap-2 h-9 border-border/60 bg-card/60 hover:bg-card/80"
+              >
+                <Calendar className="h-3.5 w-3.5" />
+                <span className="text-xs">Schedule</span>
+              </Button>
+              
+              {/* Primary CTA - Run new analysis */}
+              <motion.div
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+              >
+                <Button 
+                  variant="cta" 
                   size="sm"
-                  className="gap-2"
-                  onClick={() => handleExport("discrepancies")}
+                  className="gap-2 h-9 relative overflow-hidden shadow-lg shadow-cta/20"
+                  onClick={() => navigate("/upload")}
                 >
-                  <Download className="h-4 w-4" />
-                  Export CSV
+                  <motion.div
+                    className="absolute inset-0 bg-cta/20"
+                    animate={{
+                      scale: [1, 1.2, 1],
+                      opacity: [0.5, 0.8, 0.5],
+                    }}
+                    transition={{
+                      duration: 2,
+                      repeat: Infinity,
+                      ease: "easeInOut",
+                    }}
+                  />
+                  <Layers className="h-3.5 w-3.5 relative z-10" />
+                  <span className="relative z-10 text-xs font-semibold">New Analysis</span>
                 </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className="gap-2"
-                  onClick={() => handleExport("report")}
-                >
-                  <FileDown className="h-4 w-4" />
-                  Export Report
-                </Button>
-              </>
-            )}
-            <Button variant="secondary" className="gap-2">
-              <Calendar className="h-4 w-4" />
-              Schedule audit
-            </Button>
-            <Button variant="cta" className="gap-2">
-              <Layers className="h-4 w-4" />
-              Run new analysis
-            </Button>
+              </motion.div>
+            </div>
           </div>
         </header>
 
-        {/* 🎯 HERO METRIC: Recoverable Revenue - The Star of the Show */}         
-        <section
+        {/* Segmented Mode Toggle */}
+        {analysis?.job.user_type && (
+          <div className="flex items-center justify-center mb-6">
+            <div className="inline-flex items-center gap-1 p-1 rounded-xl border border-border/50 bg-card/50 backdrop-blur-sm">
+              <div
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all duration-200 ${
+                  analysis.job.user_type === "customer"
+                    ? "bg-primary/10 text-primary shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <ShieldCheck className="h-4 w-4" />
+                <span className="text-sm font-medium">Cost Defense</span>
+              </div>
+              <div
+                className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all duration-200 ${
+                  analysis.job.user_type === "vendor"
+                    ? "bg-cta/10 text-cta shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Wallet className="h-4 w-4" />
+                <span className="text-sm font-medium">Revenue Guard</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 🎯 HERO METRIC: Dynamic based on mode */}         
+        <motion.section
           className={`
-            relative rounded-3xl p-8 md:p-12 overflow-hidden animate-in fade-in slide-in-from-bottom-4 duration-700
+            relative rounded-3xl p-8 md:p-12 overflow-hidden
             ${isNoLeakage 
               ? "border-2 border-success/30 bg-gradient-to-br from-success/10 via-success/5 to-card/90" 
-              : "border-2 border-primary/30 bg-gradient-to-br from-primary/10 via-primary/5 to-card/90"}
+              : analysis?.job.user_type === "vendor"
+                ? "border-2 border-cta/30 bg-gradient-to-br from-cta/10 via-cta/5 to-card/90"
+                : "border-2 border-primary/30 bg-gradient-to-br from-primary/10 via-primary/5 to-card/90"}
           `}
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.6 }}
         >
-
-          {/* ICON */}
-          <div className="absolute -top-12 -right-12 w-48 h-48 rounded-full bg-primary/20 blur-2xl"></div>
+          {/* Animated background glow */}
+          <motion.div
+            className={`absolute -top-12 -right-12 w-48 h-48 rounded-full blur-2xl ${
+              isNoLeakage 
+                ? "bg-success/20" 
+                : analysis?.job.user_type === "vendor"
+                  ? "bg-cta/20"
+                  : "bg-primary/20"
+            }`}
+            animate={{
+              scale: [1, 1.2, 1],
+              opacity: [0.3, 0.5, 0.3],
+            }}
+            transition={{
+              duration: 4,
+              repeat: Infinity,
+              ease: "easeInOut",
+            }}
+          />
 
           {/* CARD CONTENT */}
           <div className="relative z-10 space-y-4">
             <div className="flex items-center gap-3">
-              <Zap className={`h-7 w-7 ${isNoLeakage ? "text-success" : "text-primary"}`} />
-              <span className="text-muted-foreground">FOUND IN THIS AUDIT</span>
+              {isNoLeakage ? (
+                <motion.div
+                  initial={{ scale: 0 }}
+                  animate={{ scale: 1 }}
+                  transition={{ type: "spring", stiffness: 200, delay: 0.2 }}
+                >
+                  <CheckCircle2 className="h-7 w-7 text-success" />
+                </motion.div>
+              ) : analysis?.job.user_type === "vendor" ? (
+                <Wallet className="h-7 w-7 text-cta" />
+              ) : (
+                <Zap className="h-7 w-7 text-primary" />
+              )}
+              <span className="text-muted-foreground text-sm uppercase tracking-wider">
+                {isNoLeakage 
+                  ? "AUDIT COMPLETE" 
+                  : "FOUND IN THIS AUDIT"}
+              </span>
             </div>
 
-            <h2 className="text-5xl md:text-6xl lg:text-7xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white to-white/60">
+            <h2 className="text-5xl md:text-6xl lg:text-7xl font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-foreground to-foreground/70">
               {formatCurrency(displayRecoverable, contractCurrency)}
             </h2>
 
-            <p className="text-xl md:text-2xl text-muted-foreground font-medium">
-              {hasPositiveLeakage ? "Recoverable Revenue" : "No Recoverable Revenue"}
-            </p>
+            {/* Dynamic messaging based on mode and state */}
+            {isNoLeakage ? (
+              <div className="space-y-2">
+                <p className="text-2xl md:text-3xl font-semibold text-success">
+                  {analysis?.job.user_type === "vendor"
+                    ? "All customers billed correctly"
+                    : "You're 100% clean!"}
+                </p>
+                <p className="text-base text-muted-foreground">
+                  {analysis?.job.user_type === "vendor"
+                    ? "No revenue leakage detected. Your billing is accurate."
+                    : "All invoices match perfectly. Your vendors are billing correctly."}
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <p className="text-xl md:text-2xl text-muted-foreground font-medium">
+                  {analysis?.job.user_type === "vendor" 
+                    ? "Revenue Leakage" 
+                    : "Recoverable Revenue"}
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  {analysis?.job.user_type === "vendor"
+                    ? `${discrepancies.length} undercharge${discrepancies.length === 1 ? '' : 's'} found across ${billingSummary.invoice_count ?? 0} invoice${(billingSummary.invoice_count ?? 0) === 1 ? '' : 's'}`
+                    : `${discrepancies.length} overcharge${discrepancies.length === 1 ? '' : 's'} found across ${billingSummary.invoice_count ?? 0} invoice${(billingSummary.invoice_count ?? 0) === 1 ? '' : 's'}`}
+                </p>
+              </div>
+            )}
 
-            {/* Subtext Example */}
-            <p className="text-sm text-muted-foreground">
-              {hasPositiveLeakage
-                ? `${discrepancies.length} discrepancies across ${billingSummary.invoice_count ?? 0} invoices`
-                : `No discrepancies in billing`}
-            </p>
-
-            <div className="flex gap-4">
-              <Button onClick={() => navigate(`/discrepancies?job=${jobId}`)} variant="default">
-                View Discrepancies
-              </Button>
-
+            <div className="flex gap-4 pt-2 flex-wrap">
+              {!isNoLeakage && (
+                <Button onClick={() => navigate(`/discrepancies?job=${jobId}`)} variant="default">
+                  View Discrepancies
+                </Button>
+              )}
               <Button onClick={() => handleExport("report")} variant="secondary">
-                Export Report
+                {analysis?.job.user_type === "vendor"
+                  ? "Export Leakage Report"
+                  : "Export Recovery Report"}
+              </Button>
+              <Button
+                onClick={() => navigate(`/artifact?job=${jobId}&type=negotiation-simulator`)}
+                variant="outline"
+                className="bg-gradient-to-r from-primary/10 to-cta/10 border-primary/30"
+              >
+                <Sparkles className="h-4 w-4 mr-2" />
+                Negotiation Simulator
+              </Button>
+              <Button
+                onClick={() => navigate(`/artifact?job=${jobId}&type=playbook`)}
+                variant="outline"
+                className="bg-gradient-to-r from-primary/10 to-cta/10 border-primary/30"
+              >
+                <Layers className="h-4 w-4 mr-2" />
+                Build Playbook
+              </Button>
+              <Button
+                onClick={() => navigate(`/artifact?type=renewal-center`)}
+                variant="outline"
+                className="bg-gradient-to-r from-destructive/10 to-cta/10 border-destructive/30"
+              >
+                <Clock className="h-4 w-4 mr-2" />
+                Renewal Center
               </Button>
             </div>
           </div>
-        </section>
+        </motion.section>
 
         {/* Supporting KPI Cards - Standardized styling */}
         <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -1251,12 +1766,18 @@ const chartFriendlyLabel = {
           <div className="lg:col-span-2 rounded-2xl border border-border/50 bg-card/90 backdrop-blur-sm shadow-sm p-6 hover:shadow-md transition-shadow duration-300">
             <div className="flex items-center justify-between mb-4">
               <div>
-                <p className="text-sm text-muted-foreground">Leakage trend</p>
-                <h2 className="text-xl font-semibold">Monthly recoverable revenue</h2>
+                <p className="text-sm text-muted-foreground">
+                  {analysis?.job.user_type === "vendor" ? "Revenue leakage trend" : "Overcharge trend"}
+                </p>
+                <h2 className="text-xl font-semibold">
+                  {analysis?.job.user_type === "vendor" 
+                    ? "Monthly revenue leakage" 
+                    : "Monthly recoverable amount"}
+                </h2>
               </div>
               <Button variant="ghost" size="sm" className="gap-2">
                 <RefreshCw className="h-4 w-4" />
-                View all {discrepancyAlerts.length} discrepancies
+                View all {discrepancyAlerts.length} {analysis?.job.user_type === "vendor" ? "undercharges" : "overcharges"}
               </Button>
             </div>
             <div data-chart="leakage" className="h-72 flex justify-center">
@@ -1432,8 +1953,18 @@ const chartFriendlyLabel = {
                     <TooltipTrigger>
                       <HelpCircle className="h-3 w-3 text-muted-foreground" />
                     </TooltipTrigger>
-                    <TooltipContent>
-                      <p>Breakdown of invoice types: recurring, one-time, credits, adjustments</p>
+                    <TooltipContent className="max-w-sm">
+                      <div className="space-y-2 text-xs">
+                        <p className="font-semibold">Fixed vs Variable Cost Split</p>
+                        <p>Critical for CFOs to see if variable costs (overages) are eating up the budget.</p>
+                        <div className="space-y-1 text-[11px] text-muted-foreground">
+                          <p><strong className="text-primary">Fixed (Subscriptions):</strong> Predictable monthly fees, base licenses, platform fees</p>
+                          <p><strong className="text-cta">Variable (Overages):</strong> Usage-based charges, storage/compute overages, per-unit fees</p>
+                        </div>
+                        <p className="text-[11px] text-muted-foreground mt-2">
+                          High variable costs may indicate uncontrolled usage growth.
+                        </p>
+                      </div>
                     </TooltipContent>
                   </Tooltip>
                 </p>
@@ -1479,13 +2010,96 @@ const chartFriendlyLabel = {
           </div>
         </section>
 
+        {/* 🔔 UPCOMING RENEWALS SECTION */}
+        {!renewalsLoading && upcomingRenewals.length > 0 && (
+          <section className="rounded-2xl border border-border/50 bg-card/90 backdrop-blur-sm shadow-sm p-6 hover:shadow-md transition-shadow duration-300">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <p className="text-sm text-muted-foreground">Renewal Intelligence</p>
+                <h3 className="text-xl font-semibold">Upcoming Renewals</h3>
+              </div>
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                className="gap-2"
+                onClick={() => {
+                  // Navigate to renewals page or show all renewals
+                  // For now, we can show a toast or navigate to a renewals view
+                  toast({
+                    title: "Viewing all renewals",
+                    description: "Full renewals view coming soon",
+                  });
+                }}
+              >
+                View All
+                <ArrowUpRight className="h-4 w-4" />
+              </Button>
+            </div>
+            
+            <div className="space-y-3">
+              {upcomingRenewals.map((renewal) => {
+                const isUrgent = renewal.days_until_renewal <= 30;
+                const isWarning = renewal.days_until_renewal <= 60;
+                const renewalDate = new Date(renewal.termination_date);
+                
+                return (
+                  <div
+                    key={renewal.job_id}
+                    className={`rounded-lg border p-4 transition-all ${
+                      isUrgent
+                        ? "border-destructive/50 bg-destructive/5"
+                        : isWarning
+                          ? "border-cta/50 bg-cta/5"
+                          : "border-border/50 bg-card/50"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2 mb-1">
+                          <h4 className="font-semibold">{renewal.vendor_name}</h4>
+                          {isUrgent && (
+                            <span className="text-xs px-2 py-0.5 rounded-full bg-destructive/20 text-destructive font-medium">
+                              Urgent
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-sm text-muted-foreground">
+                          Renews {renewalDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} • {renewal.days_until_renewal} days left
+                        </p>
+                        {renewal.recoverable_amount > 0 && (
+                          <p className="text-xs text-muted-foreground mt-1">
+                            {formatCurrency(renewal.recoverable_amount, renewal.currency)} in leverage
+                          </p>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => navigate(`/dashboard?job=${renewal.job_id}`)}
+                        >
+                          View Pack
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
         {/* 🔥 ADD REF HERE */}
         <section ref={discrepanciesSectionRef} className="grid gap-6 lg:grid-cols-3 md:grid-cols-1">
           <div className="lg:col-span-2 rounded-2xl border border-border/50 bg-card/90 backdrop-blur-sm shadow-sm p-6 hover:shadow-md transition-shadow duration-300">
             <div className="flex items-center justify-between mb-4">
               <div>
-                <p className="text-sm text-muted-foreground">Discrepancies</p>
-                <h3 className="text-xl font-semibold">Prioritized contract alerts</h3>
+                <p className="text-sm text-muted-foreground">{analysis?.job.user_type === "vendor" ? "Undercharges" : "Overcharges"}</p>
+                <h3 className="text-xl font-semibold">
+                  {analysis?.job.user_type === "vendor" 
+                    ? "Prioritized billing alerts" 
+                    : "Prioritized contract alerts"}
+                </h3>
               </div>
               <div className="flex flex-wrap gap-2">
                 <Button variant="ghost" size="sm" className="gap-2">
@@ -1494,7 +2108,7 @@ const chartFriendlyLabel = {
                 </Button>
                 <div className="flex gap-2">
                   <select className="h-9 rounded-lg border border-border bg-card px-2 text-xs">
-                    <option>All discrepancies</option>
+                    <option>All {analysis?.job.user_type === "vendor" ? "undercharges" : "overcharges"}</option>
                     <option>Escalator</option>
                     <option>Discount</option>
                     <option>Renewal</option>
@@ -1518,8 +2132,10 @@ const chartFriendlyLabel = {
               {groupedDiscrepancies.length === 0 ? (
                 <EmptyState
                   icon={CheckCircle2}
-                  title="No discrepancies found"
-                  description="All invoices match contract terms. Great job keeping your billing in check!"
+                  title={analysis?.job.user_type === "vendor" ? "No revenue leakage found" : "No overcharges found"}
+                  description={analysis?.job.user_type === "vendor"
+                    ? "All customers billed correctly. Great job maintaining accurate billing!"
+                    : "All invoices match contract terms. Your vendor billing is accurate."}
                 />
               ) : (
                 groupedDiscrepancies.map((group, groupIndex) => {
@@ -1547,19 +2163,27 @@ const chartFriendlyLabel = {
                                 : "text-muted-foreground"
                           }`} />
                           <div>
-                            <h3 className="font-semibold text-lg">{group.customer}</h3>
+                            <h3 className="font-semibold text-lg">
+                              {analysis?.job.user_type === "vendor" 
+                                ? group.customer || "Unknown Customer"
+                                : analysis?.job.vendor_name || group.customer || "Unknown Vendor"}
+                            </h3>
                             <p className="text-xs text-muted-foreground">
                               {group.count} {group.count === 1 ? "issue" : "issues"} spanning {formatDateRange(group.earliest_date, group.latest_date)}
                             </p>
                           </div>
                         </div>
                         <div className="text-right">
-                          <p className="text-2xl font-bold text-destructive">
+                          <p className={`text-2xl font-bold ${
+                            analysis?.job.user_type === "vendor" ? "text-cta" : "text-destructive"
+                          }`}>
                             {formatCurrency(group.total, contractCurrency)}
                           </p>
                           <span className={`text-xs font-semibold px-2 py-1 rounded-full ${
                             group.priority?.toLowerCase() === "high" || group.priority?.toLowerCase() === "critical"
-                              ? "bg-destructive text-destructive-foreground"
+                              ? analysis?.job.user_type === "vendor" 
+                                ? "bg-cta text-cta-foreground"
+                                : "bg-destructive text-destructive-foreground"
                               : group.priority?.toLowerCase() === "medium"
                                 ? "bg-cta text-cta-foreground"
                                 : "bg-secondary text-foreground"
@@ -1577,7 +2201,10 @@ const chartFriendlyLabel = {
                       >
                         <summary className="cursor-pointer text-sm text-muted-foreground hover:text-foreground flex items-center gap-2 list-none">
                           {isExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-                          <span>View {group.count} affected {group.count === 1 ? "invoice" : "invoices"} →</span>
+                          <span>
+                            View {group.count} affected {group.count === 1 ? "invoice" : "invoices"}
+                            {analysis?.job.user_type === "vendor" ? " to rebill" : ""} →
+                          </span>
                         </summary>
                         <div className="mt-3 space-y-2 pl-4 border-l border-border">
                           {group.discrepancies.map((disc, idx) => (
@@ -1589,6 +2216,32 @@ const chartFriendlyLabel = {
                               onViewAuditTrail={(disc) => {
                                 setSelectedDiscrepancyForAudit(disc);
                                 setAuditTrailOpen(true);
+                              }}
+                              onOpenArtifact={(disc) => {
+                                setSelectedDiscrepancyForArtifact(disc);
+                                // Use issue as identifier if no ID exists
+                                const identifier = disc.id || disc.issue || encodeURIComponent(JSON.stringify({ issue: disc.issue, value: disc.value }));
+                                navigate(`/artifact?job=${jobId}&discrepancy=${identifier}&type=recovery-pack`);
+                              }}
+                              onClick={(disc) => {
+                                // Don't open the main dialog - just do nothing or open View Details instead
+                                // setSelectedDiscrepancy(disc);
+                              }}
+                              onOpenSplitView={(disc) => {
+                                const invoiceEvidence = disc.evidence?.find(
+                                  (item: any) => item.type === "invoice_line_error"
+                                );
+                                const contractEvidence = disc.evidence?.find(
+                                  (item: any) => item.type === "contract_clause"
+                                );
+                                if (invoiceEvidence && contractEvidence) {
+                                  setSplitViewData({
+                                    discrepancy: disc,
+                                    invoiceEvidence,
+                                    contractEvidence,
+                                  });
+                                  setSplitViewOpen(true);
+                                }
                               }}
                             />
                           ))}
@@ -1622,7 +2275,7 @@ const chartFriendlyLabel = {
                           }}
                         >
                           <Mail className="h-4 w-4" />
-                          Generate Dispute Letter
+                          {analysis?.job.user_type === "vendor" ? "Generate Rebilling Notice" : "Generate Dispute Letter"}
                         </Button>
                         <Button variant="secondary" size="sm">View Contract</Button>
                         <Button variant="secondary" size="sm">Export Report</Button>
@@ -1935,7 +2588,9 @@ const chartFriendlyLabel = {
               </p>
               <p className="text-2xl font-bold text-foreground mt-1">
                 {primaryDiscrepancy
-                  ? `Contact ${primaryDiscrepancy.customer ?? "customer"} about ${primaryDiscrepancy.issue}`
+                  ? analysis?.job.user_type === "vendor"
+                    ? `Rebill customer for: ${primaryDiscrepancy.issue}`
+                    : `Request refund for: ${primaryDiscrepancy.issue}`
                   : "Keep monitoring your contracts"}
               </p>
             </div>
@@ -1949,7 +2604,7 @@ const chartFriendlyLabel = {
             {primaryDiscrepancy ? (
               <>
                 <span className="font-semibold text-foreground">
-                  {formatCurrency(recoverableAmount, contractCurrency)} at risk
+                  {formatCurrency(recoverableAmount, contractCurrency)} {analysis?.job.user_type === "vendor" ? "revenue leakage" : "to recover"}
                 </span>
                 {discrepancies.length > 1 ? (
                   <>
@@ -1969,10 +2624,14 @@ const chartFriendlyLabel = {
                   </>
                 ) : null}
                 {". "}
-                {primaryDiscrepancy.issue}.
+                {analysis?.job.user_type === "vendor"
+                  ? `Customer ${analysis?.job.vendor_name || "billing"} needs to be rebilled for ${primaryDiscrepancy.issue}.`
+                  : `Contact ${analysis?.job.vendor_name || "vendor"} about ${primaryDiscrepancy.issue}.`}
               </>
             ) : (
-              "No discrepancies at the moment. Stay proactive by scheduling periodic audits."
+              analysis?.job.user_type === "vendor"
+                ? "No revenue leakage at the moment. Stay proactive by scheduling periodic billing audits."
+                : "No overcharges at the moment. Stay proactive by scheduling periodic audits."
             )}
           </p>
           <div className="flex flex-wrap gap-3 w-full sm:w-auto">
@@ -1999,7 +2658,9 @@ const chartFriendlyLabel = {
                     GPT-4o Analysis
                   </p>
                   <h3 className="text-xl font-bold mt-1">
-                    {primaryDiscrepancy?.customer ?? "Contract Intelligence"}
+                    {analysis?.job.user_type === "vendor"
+                      ? `Analysis for ${analysis?.job.vendor_name ?? primaryDiscrepancy?.customer ?? "Customer"}`
+                      : `Analysis for ${analysis?.job.vendor_name ?? "Vendor"}`}
                   </h3>
                 </div>
                 <div className="flex gap-2">
@@ -2086,9 +2747,15 @@ const chartFriendlyLabel = {
                         <Mail className="h-5 w-5 text-destructive" />
                       </div>
                       <div>
-                        <p className="font-bold text-base">Generate Dispute Letter</p>
+                        <p className="font-bold text-base">
+                          {analysis?.job.user_type === "vendor"
+                            ? "Generate Rebilling Notice"
+                            : "Generate Dispute Letter"}
+                        </p>
                         <p className="text-xs text-muted-foreground">
-                          Request {formatCurrency(recoverableAmount, contractCurrency)} from {primaryDiscrepancy?.customer || "customer"}
+                          {analysis?.job.user_type === "vendor"
+                            ? `Generate rebilling notice for ${formatCurrency(recoverableAmount, contractCurrency)} in undercharges`
+                            : `Request ${formatCurrency(recoverableAmount, contractCurrency)} refund from ${analysis?.job.vendor_name || primaryDiscrepancy?.customer || "vendor"}`}
                         </p>
                       </div>
                     </div>
@@ -2116,7 +2783,9 @@ const chartFriendlyLabel = {
                       <div>
                         <p className="font-semibold text-sm">Schedule Follow-up</p>
                         <p className="text-xs text-muted-foreground">
-                          Audit {primaryDiscrepancy?.customer || "vendor"} again in 30 days
+                          {analysis?.job.user_type === "vendor"
+                            ? `Re-audit ${analysis?.job.vendor_name || "customer"} billing in 30 days`
+                            : `Audit ${analysis?.job.vendor_name || "vendor"} again in 30 days`}
                         </p>
                       </div>
                     </div>
@@ -2382,101 +3051,481 @@ const chartFriendlyLabel = {
         )}
       </div>
 
-      <Dialog open={!!selectedDiscrepancy} onOpenChange={(open) => (!open ? setSelectedDiscrepancy(null) : null)}>
-        <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
-          {selectedDiscrepancy && (
+      {/* Main Discrepancy Detail Dialog - DISABLED to prevent overlap with View Details and Audit Trail dialogs */}
+      {/* This dialog is disabled - users should use "View Details" or "Audit Trail" buttons instead */}
+
+      {/* Split View Evidence Comparison */}
+      <Sheet 
+        open={splitViewOpen} 
+        onOpenChange={(open) => {
+          setSplitViewOpen(open);
+          if (!open) {
+            // Cleanup when closing
+            if (splitViewPdfBlobUrl) {
+              URL.revokeObjectURL(splitViewPdfBlobUrl);
+              setSplitViewPdfBlobUrl(null);
+            }
+            setSplitViewData(null);
+            setSplitViewPdfScale(1.5);
+            setSplitViewAutoScale(1.5);
+            setSplitViewDimensions({ width: 0, height: 0 });
+          } else if (splitViewData) {
+            // Reset PDF blob when opening with new data
+            if (splitViewPdfBlobUrl) {
+              URL.revokeObjectURL(splitViewPdfBlobUrl);
+              setSplitViewPdfBlobUrl(null);
+            }
+            setSplitViewPdfScale(1.5);
+            setSplitViewAutoScale(1.5);
+            setSplitViewDimensions({ width: 0, height: 0 });
+          }
+        }}
+      >
+        <SheetContent
+          side="right"
+          className="p-0 flex flex-col border-l border-border bg-background w-full sm:max-w-[95vw]"
+        >
+          {splitViewData && (
             <>
-              <DialogHeader>
-                <DialogTitle className="text-2xl">
-                  {selectedDiscrepancy.issue ?? "Discrepancy detail"} —{" "}
-                  {formatCurrency(selectedDiscrepancy.value ?? 0, contractCurrency)}
-                </DialogTitle>
-              </DialogHeader>
-              <div className="space-y-4 text-sm text-muted-foreground">
-                <p>
-                  <span className="font-semibold text-foreground">Priority:</span>{" "}
-                  {selectedDiscrepancy.priority ?? "—"}
+              <SheetHeader className="p-6 border-b border-border/60">
+                <SheetTitle className="text-lg">
+                  Evidence Comparison: {splitViewData.discrepancy.issue}
+                </SheetTitle>
+                <p className="text-sm text-muted-foreground mt-1">
+                  Compare invoice line item with contract clause
                 </p>
-                <p>
-                  <span className="font-semibold text-foreground">Customer:</span>{" "}
-                  {selectedDiscrepancy.customer ?? "—"}
-                </p>
-                <p>
-                  <span className="font-semibold text-foreground">Recommended action:</span>{" "}
-                  {selectedDiscrepancy.recommended_action ?? "Review contract and rebill vendor."}
-                </p>
-                <div className="rounded-2xl border border-border/60 p-4 bg-secondary/20 space-y-2">
-                  <p className="font-semibold text-foreground text-sm">Invoice evidence</p>
-                  {selectedDiscrepancy.evidence?.filter((item: any) => item.type !== "contract_clause").length ? (
-                    selectedDiscrepancy.evidence
-                      ?.filter((item: any) => item.type !== "contract_clause")
-                      .map((item: any, idx: number) => (
-                        <div key={`invoice-evidence-${idx}`} className="flex justify-between text-xs py-1 border-b border-border/30">
-                          <div>
-                            <p className="font-semibold text-foreground">{item.reference ?? `Invoice ${idx + 1}`}</p>
-                            <p>{item.description}</p>
+              </SheetHeader>
+              <div className="flex-1 flex overflow-hidden">
+                {/* Left Side: Original Billing File (Excel/CSV) */}
+                <div className="w-1/2 border-r border-border/60 overflow-hidden bg-secondary/10 flex flex-col">
+                  <div className="px-6 py-3 border-b border-border/60 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <FileTextIcon className="h-5 w-5 text-primary" />
+                      <h3 className="text-lg font-semibold">Original Invoice File</h3>
+                    </div>
+                    {(() => {
+                      // Find the billing file that contains this invoice
+                      const sourceFile = splitViewData.invoiceEvidence.__source_file || 
+                                        splitViewData.invoiceEvidence.source_file ||
+                                        billingFiles.find((f) => 
+                                          f.filename?.toLowerCase().includes("invoice") ||
+                                          f.filename?.toLowerCase().endsWith(".csv") ||
+                                          f.filename?.toLowerCase().endsWith(".xlsx") ||
+                                          f.filename?.toLowerCase().endsWith(".xls")
+                                        )?.filename;
+                      const billingFile = billingFiles.find((f) => f.filename === sourceFile) || billingFiles[0];
+                      const billingUrl = billingFile && jobId
+                        ? `${API_BASE}/jobs/${jobId}/billing/${encodeURIComponent(billingFile.filename)}`
+                        : null;
+                      
+                      return billingUrl ? (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            // Open in new tab as fallback
+                            window.open(billingUrl, '_blank');
+                          }}
+                        >
+                          <Download className="h-4 w-4 mr-2" />
+                          Download
+                        </Button>
+                      ) : null;
+                    })()}
+                  </div>
+                  <div className="flex-1 overflow-auto p-6">
+                    {(() => {
+                      // Find the billing file that contains this invoice
+                      const sourceFile = splitViewData.invoiceEvidence.__source_file || 
+                                        splitViewData.invoiceEvidence.source_file ||
+                                        billingFiles.find((f) => 
+                                          f.filename?.toLowerCase().includes("invoice") ||
+                                          f.filename?.toLowerCase().endsWith(".csv") ||
+                                          f.filename?.toLowerCase().endsWith(".xlsx") ||
+                                          f.filename?.toLowerCase().endsWith(".xls")
+                                        )?.filename;
+                      const billingFile = billingFiles.find((f) => f.filename === sourceFile) || billingFiles[0];
+                      const billingUrl = billingFile && jobId
+                        ? `${API_BASE}/jobs/${jobId}/billing/${encodeURIComponent(billingFile.filename)}`
+                        : null;
+                      
+                      if (!billingUrl) {
+                        return (
+                          <div className="text-center text-muted-foreground py-8">
+                            <p>Billing file not found</p>
+                            <p className="text-xs mt-2">Invoice Reference: {splitViewData.invoiceEvidence.reference ?? "N/A"}</p>
                           </div>
-                          <div className="text-right">
-                            <p>{item.invoice_date ?? "—"}</p>
-                            <p className="font-mono text-destructive">
-                              -{formatCurrency(item.leakage_amount ?? 0, contractCurrency)}
-                            </p>
+                        );
+                      }
+                      
+                      const isExcel = billingFile.filename?.toLowerCase().endsWith('.xlsx') || 
+                                     billingFile.filename?.toLowerCase().endsWith('.xls');
+                      const isCsv = billingFile.filename?.toLowerCase().endsWith('.csv');
+                      
+                      if (isExcel || isCsv) {
+                        // For Excel and CSV files, fetch data and display in a table
+                        const FileViewerComponent = () => {
+                          const [fileRows, setFileRows] = useState<Array<Record<string, string>>>([]);
+                          const [fileHeaders, setFileHeaders] = useState<string[]>([]);
+                          const [loading, setLoading] = useState(true);
+                          const [error, setError] = useState<string | null>(null);
+                          
+                          useEffect(() => {
+                            if (!billingUrl || !jobId || !billingFile) return;
+                            
+                            setLoading(true);
+                            // Use the new data endpoint for both Excel and CSV
+                            const dataUrl = `${API_BASE}/jobs/${jobId}/billing/${encodeURIComponent(billingFile.filename)}/data`;
+                            
+                            fetch(dataUrl, { headers: getAuthHeader() })
+                              .then((res) => {
+                                if (!res.ok) throw new Error('Failed to load file data');
+                                return res.json();
+                              })
+                              .then((data: { headers: string[]; rows: Array<Record<string, string>> }) => {
+                                setFileHeaders(data.headers || []);
+                                setFileRows(data.rows || []);
+                                setLoading(false);
+                              })
+                              .catch((err) => {
+                                setError(err.message);
+                                setLoading(false);
+                              });
+                          }, [billingUrl, jobId, billingFile]);
+                          
+                          if (loading) {
+                            return (
+                              <div className="flex items-center justify-center py-8">
+                                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                                <span className="ml-2 text-sm text-muted-foreground">Loading {isExcel ? 'Excel' : 'CSV'}...</span>
+                              </div>
+                            );
+                          }
+                          
+                          if (error) {
+                            return (
+                              <div className="text-center text-destructive py-4">
+                                <p>Error loading {isExcel ? 'Excel' : 'CSV'}: {error}</p>
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="mt-2"
+                                  onClick={() => {
+                                    window.open(billingUrl, '_blank');
+                                  }}
+                                >
+                                  <Download className="h-4 w-4 mr-2" />
+                                  Download Original File
+                                </Button>
+                              </div>
+                            );
+                          }
+                          
+                          // Highlight the row that matches the invoice reference
+                          const invoiceRef = splitViewData.invoiceEvidence.reference;
+                          const highlightedRowIndex = fileRows.findIndex(row => 
+                            Object.values(row).some(val => val && invoiceRef && val.includes(invoiceRef))
+                          );
+                          
+                          return (
+                            <div className="mt-4 rounded-lg border border-border/60 overflow-hidden bg-white">
+                              <div className="overflow-x-auto max-h-[500px] overflow-y-auto">
+                                <table className="w-full text-xs border-collapse" style={{ fontFamily: 'Calibri, Arial, sans-serif' }}>
+                                  <thead className="sticky top-0 z-10">
+                                    <tr>
+                                      {fileHeaders.map((header, idx) => (
+                                        <th 
+                                          key={idx} 
+                                          className="px-3 py-2 text-left font-semibold bg-[#f2f2f2] text-[#333] border border-[#d0d0d0]"
+                                          style={{ 
+                                            backgroundColor: '#f2f2f2',
+                                            border: '1px solid #d0d0d0',
+                                            fontWeight: 600
+                                          }}
+                                        >
+                                          {header}
+                                        </th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {fileRows.map((row, rowIdx) => (
+                                      <tr
+                                        key={rowIdx}
+                                        className={`${
+                                          rowIdx === highlightedRowIndex
+                                            ? 'bg-[#fff4e6]'
+                                            : rowIdx % 2 === 0
+                                            ? 'bg-white'
+                                            : 'bg-[#fafafa]'
+                                        }`}
+                                        style={{
+                                          backgroundColor: rowIdx === highlightedRowIndex 
+                                            ? '#fff4e6' 
+                                            : rowIdx % 2 === 0 
+                                            ? '#ffffff' 
+                                            : '#fafafa'
+                                        }}
+                                      >
+                                        {fileHeaders.map((header, colIdx) => (
+                                          <td 
+                                            key={colIdx} 
+                                            className="px-3 py-2 text-[#333] border border-[#d0d0d0]"
+                                            style={{ 
+                                              border: '1px solid #d0d0d0',
+                                              padding: '6px 12px',
+                                              whiteSpace: 'nowrap'
+                                            }}
+                                          >
+                                            {row[header] || ''}
+                                          </td>
+                                        ))}
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                              {highlightedRowIndex >= 0 && (
+                                <div className="px-4 py-2 bg-cta/10 border-t border-cta/40 text-xs text-muted-foreground">
+                                  Highlighted row matches invoice reference: {invoiceRef}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        };
+                        
+                        return (
+                          <div className="space-y-4">
+                            <div className="rounded-lg border border-border/60 p-4 bg-card">
+                              <p className="text-xs uppercase tracking-wide text-muted-foreground mb-2">File</p>
+                              <p className="font-semibold text-foreground">{billingFile.filename}</p>
+                            </div>
+                            <FileViewerComponent />
                           </div>
+                        );
+                      }
+                      
+                      return (
+                        <div className="text-center text-muted-foreground py-8">
+                          <p>Unsupported file type: {billingFile.filename}</p>
                         </div>
-                      ))
-                  ) : (
-                    <p className="text-xs">No invoice evidence was attached.</p>
-                  )}
+                      );
+                    })()}
+                  </div>
                 </div>
-                <div className="rounded-2xl border border-border/60 p-4 bg-secondary/20 space-y-2">
-                  <p className="font-semibold text-foreground text-sm">Contract references</p>
-                  {selectedDiscrepancy.evidence?.filter((item: any) => item.type === "contract_clause").length ? (
-                    selectedDiscrepancy.evidence
-                      ?.filter((item: any) => item.type === "contract_clause")
-                      .map((item: any, idx: number) => (
-                        <div key={`clause-evidence-${idx}`} className="text-xs space-y-1">
-                          <p className="font-semibold text-foreground">{item.label}</p>
-                          <p>{item.text}</p>
+
+                {/* Right Side: Contract Clause PDF */}
+                <div className="w-1/2 overflow-y-auto bg-background">
+                  {splitViewData.contractEvidence.file && (
+                    <div className="flex-1 flex flex-col min-h-0">
+                      <div className="px-6 py-3 border-b border-border/60 text-sm text-muted-foreground flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <FileText className="h-4 w-4 text-cta" />
+                          <span>Contract Clause: {splitViewData.contractEvidence.label ?? "Reference"}</span>
                         </div>
-                      ))
-                  ) : (
-                    <p className="text-xs">No clause references were linked.</p>
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                          Zoom {Math.round((splitViewPdfScale / splitViewAutoScale) * 100)}%
+                          <div className="flex rounded-lg border border-border overflow-hidden">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8"
+                              onClick={() => setSplitViewPdfScale((prev) => Math.max(0.3, +(prev * 0.8).toFixed(2)))}
+                              title="Zoom out"
+                            >
+                              −
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 px-3 text-[11px]"
+                              onClick={() => setSplitViewPdfScale(splitViewAutoScale)}
+                              title="Fit entire page to viewer"
+                            >
+                              Fit Page
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8"
+                              onClick={() => setSplitViewPdfScale((prev) => Math.min(5, +(prev * 1.25).toFixed(2)))}
+                              title="Zoom in"
+                            >
+                              +
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden bg-secondary/30 py-4 px-6">
+                        <div className="flex justify-center">
+                          <div className="relative">
+                            {(() => {
+                              const contractDoc = documents.find(
+                                (d) => d.filename === splitViewData.contractEvidence.file
+                              );
+                              const contractUrl = contractDoc && jobId
+                                ? `${API_BASE}/jobs/${jobId}/contracts/${encodeURIComponent(contractDoc.filename)}`
+                                : null;
+                              
+                              // Get highlight bounds from contract evidence
+                              const highlightBounds = splitViewData.contractEvidence.bounds ||
+                                splitViewData.contractEvidence.regions?.[0]?.bounds;
+                              const highlightPage = splitViewData.contractEvidence.page ||
+                                splitViewData.contractEvidence.regions?.[0]?.page ||
+                                1;
+
+                              return contractUrl ? (
+                                <>
+                                  {splitViewPdfBlobUrl ? (
+                                    <PdfDocument
+                                      file={splitViewPdfBlobUrl}
+                                      loading={<p>Loading contract…</p>}
+                                    >
+                                      <PdfPage
+                                        key={`${highlightPage}-${splitViewPdfScale}`}
+                                        pageNumber={highlightPage}
+                                        scale={splitViewPdfScale}
+                                        renderAnnotationLayer={false}
+                                        renderTextLayer={false}
+                                        onRenderSuccess={(page) => {
+                                          const defaultScale = 1.5;
+                                          const scaledViewport = page.getViewport({ scale: splitViewPdfScale });
+                                          setSplitViewDimensions({ width: scaledViewport.width, height: scaledViewport.height });
+                                          if (splitViewPdfScale === 1.0) {
+                                            setSplitViewPdfScale(defaultScale);
+                                            setSplitViewAutoScale(defaultScale);
+                                          }
+                                        }}
+                                      />
+                                    </PdfDocument>
+                                  ) : (
+                                    <PdfDocument
+                                      file={contractUrl}
+                                      loading={<p>Loading contract…</p>}
+                                      onLoadSuccess={(doc) => {
+                                        // Fetch PDF as blob for highlighting
+                                        fetch(contractUrl, { headers: getAuthHeader() })
+                                          .then((res) => res.blob())
+                                          .then((blob) => {
+                                            const url = URL.createObjectURL(blob);
+                                            setSplitViewPdfBlobUrl(url);
+                                          })
+                                          .catch((err) => {
+                                            console.error("Failed to load PDF:", err);
+                                          });
+                                      }}
+                                    >
+                                      <PdfPage
+                                        key={`${highlightPage}-${splitViewPdfScale}`}
+                                        pageNumber={highlightPage}
+                                        scale={splitViewPdfScale}
+                                        renderAnnotationLayer={false}
+                                        renderTextLayer={false}
+                                        onRenderSuccess={(page) => {
+                                          const defaultScale = 1.5;
+                                          const scaledViewport = page.getViewport({ scale: splitViewPdfScale });
+                                          setSplitViewDimensions({ width: scaledViewport.width, height: scaledViewport.height });
+                                          if (splitViewPdfScale === 1.0) {
+                                            setSplitViewPdfScale(defaultScale);
+                                            setSplitViewAutoScale(defaultScale);
+                                          }
+                                        }}
+                                      />
+                                    </PdfDocument>
+                                  )}
+                                  {highlightBounds && splitViewDimensions.width > 0 && splitViewDimensions.height > 0 && (
+                                    <div
+                                      className="absolute border-2 border-cta bg-cta/30 rounded-md pointer-events-none transition-all shadow-lg"
+                                      style={{
+                                        left: highlightBounds.x * splitViewDimensions.width,
+                                        top: highlightBounds.y * splitViewDimensions.height,
+                                        width: highlightBounds.width * splitViewDimensions.width,
+                                        height: highlightBounds.height * splitViewDimensions.height,
+                                      }}
+                                    />
+                                  )}
+                                </>
+                              ) : (
+                                <div className="p-8 text-center text-muted-foreground">
+                                  <p>Contract document not found</p>
+                                </div>
+                              );
+                            })()}
+                          </div>
+                        </div>
+                      </div>
+                      {splitViewData.contractEvidence.text && (
+                        <div className="border-t border-border/60 p-4 bg-card/50">
+                          <p className="text-xs uppercase tracking-wide text-muted-foreground mb-2">Clause Text</p>
+                          <p className="text-sm text-foreground leading-relaxed">
+                            {splitViewData.contractEvidence.text}
+                          </p>
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
               </div>
             </>
           )}
-        </DialogContent>
-      </Dialog>
+        </SheetContent>
+      </Sheet>
 
       {/* Floating AI Copilot Button - Premium & Prominent */}
       {!chatOpen && jobId && (
         <div className="fixed bottom-6 right-6 z-50">
+          <style>{`
+            @keyframes pulse-glow {
+              0%, 100% {
+                box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4), 0 0 30px rgba(59, 130, 246, 0.5);
+                transform: scale(1);
+              }
+              50% {
+                box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4), 0 0 50px rgba(59, 130, 246, 0.8);
+                transform: scale(1.02);
+              }
+            }
+            .pulse-button {
+              animation: pulse-glow 2s ease-in-out infinite;
+            }
+            .pulse-button:hover {
+              animation: none;
+            }
+          `}</style>
           <Button
             variant="cta"
             size="lg"
-            className="h-14 px-6 rounded-full shadow-2xl hover:shadow-primary/30 bg-gradient-to-r from-primary to-primary/90 hover:from-primary/90 hover:to-primary/80 transition-all duration-300 group animate-in fade-in slide-in-from-bottom-4"
+            className="pulse-button h-14 px-6 rounded-full bg-gradient-to-r from-cta to-cta/90 hover:from-cta/90 hover:to-cta/80 transition-all duration-300 group animate-in fade-in slide-in-from-bottom-4 border-2 border-white/20 hover:border-white/40"
             onClick={() => setChatOpen(true)}
           >
             <div className="relative mr-2">
-              <MessageSquare className="h-5 w-5" />
-              <span className="absolute -top-1 -right-1 h-3 w-3 bg-cta rounded-full border-2 border-background animate-pulse" />
+              <MessageSquare className="h-5 w-5 text-white" />
+              <span className="absolute -top-1 -right-1 h-3 w-3 bg-white rounded-full border-2 border-cta animate-pulse shadow-lg" />
             </div>
-            <span className="font-semibold">Ask AI Copilot</span>
-            <Sparkles className="h-4 w-4 ml-2 opacity-70 group-hover:opacity-100 transition-opacity" />
+            <span className="font-semibold text-white drop-shadow-sm">Ask AI Copilot</span>
+            <Sparkles className="h-4 w-4 ml-2 text-white opacity-90 group-hover:opacity-100 transition-opacity" />
           </Button>
         </div>
       )}
 
       <Sheet open={!!viewerClause} onOpenChange={(open) => (!open ? closeViewer() : null)}>
-        <SheetContent
-          side="right"
-          className="p-0 flex flex-col border-l border-border bg-background"
-          style={{
-            width: viewerDimensions.width > 0 ? `${viewerDimensions.width + 48}px` : '50vw',
-            maxWidth: '95vw',
-          }}
-        >
+        <SheetPortal>
+          {/* Make overlay transparent when chat is open to prevent fading */}
+          {chatOpen ? (
+            <div className="fixed inset-0 z-50 bg-transparent pointer-events-none" />
+          ) : (
+            <SheetOverlay />
+          )}
+          <SheetPrimitive.Content
+            className={`fixed z-50 gap-4 bg-background p-0 flex flex-col border-l border-border shadow-lg transition-all duration-300 inset-y-0 right-0 h-full data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right ${
+              chatOpen ? 'shadow-2xl' : ''
+            }`}
+            style={{
+              width: viewerDimensions.width > 0 ? `${viewerDimensions.width + 48}px` : '50vw',
+              maxWidth: chatOpen ? '50vw' : '95vw',
+              zIndex: chatOpen ? 60 : 50,
+            }}
+          >
           <SheetHeader className="p-6 border-b border-border/60">
             <SheetTitle className="text-lg">
               {viewerClause?.doc.filename ?? "Contract preview"}
@@ -2578,7 +3627,12 @@ const chartFriendlyLabel = {
               Unable to load the original document. Please re-upload the contract.
             </div>
           )}
-        </SheetContent>
+          <SheetPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity data-[state=open]:bg-secondary hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none">
+            <X className="h-4 w-4" />
+            <span className="sr-only">Close</span>
+          </SheetPrimitive.Close>
+          </SheetPrimitive.Content>
+        </SheetPortal>
       </Sheet>
 
       {/* Customer Drill-Down Modal */}
@@ -2609,7 +3663,42 @@ const chartFriendlyLabel = {
         <Dialog open={auditTrailOpen} onOpenChange={setAuditTrailOpen}>
           <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
             <DialogHeader>
-              <DialogTitle>Audit Trail</DialogTitle>
+              <div className="flex items-center justify-between">
+                <DialogTitle>Audit Trail</DialogTitle>
+                {selectedDiscrepancyForAudit.evidence?.some((item: any) => item.type === "invoice_line_error") &&
+                 selectedDiscrepancyForAudit.evidence?.some((item: any) => item.type === "contract_clause") && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      const invoiceEvidence = selectedDiscrepancyForAudit.evidence?.find(
+                        (item: any) => item.type === "invoice_line_error"
+                      );
+                      const contractEvidence = selectedDiscrepancyForAudit.evidence?.find(
+                        (item: any) => item.type === "contract_clause"
+                      );
+                      if (invoiceEvidence && contractEvidence) {
+                        // Capture the discrepancy data before closing the dialog
+                        const discrepancyData = selectedDiscrepancyForAudit;
+                        // Close the audit trail dialog first to avoid overlap
+                        setAuditTrailOpen(false);
+                        // Then open split view after a delay to ensure dialog fully closes
+                        setTimeout(() => {
+                          setSplitViewData({
+                            discrepancy: discrepancyData,
+                            invoiceEvidence,
+                            contractEvidence,
+                          });
+                          setSplitViewOpen(true);
+                        }, 200);
+                      }
+                    }}
+                  >
+                    <FileText className="h-4 w-4 mr-2" />
+                    Split View
+                  </Button>
+                )}
+              </div>
             </DialogHeader>
             <AuditTrail
               discrepancy={selectedDiscrepancyForAudit}
@@ -2623,76 +3712,110 @@ const chartFriendlyLabel = {
         </Dialog>
       )}
 
-      {/* Enhanced Contract Chat Sheet */}
+      {/* Full Screen Chat Dialog */}
       {chatOpen && jobId && (
-        <Sheet open={chatOpen} onOpenChange={setChatOpen}>
-          <SheetContent className="w-full sm:max-w-2xl">
-            <SheetHeader>
-              <SheetTitle>Contract Assistant</SheetTitle>
-            </SheetHeader>
-            <div className="mt-4 h-[calc(100vh-120px)]">
-              <ContractChat 
-                jobId={jobId} 
-                vendorName={analysis?.job.vendor_name}
-                onOpenDocument={(evidence: {
-                  type: string;
-                  file?: string;
-                  page?: number;
-                  label?: string;
-                  text?: string;
-                  bounds?: any;
-                  regions?: any[];
-                  metadata?: Record<string, any>;
-                }) => {
-                  if (evidence.type === "contract_clause" && evidence.file) {
-                    const doc = documents.find((d) => d.filename === evidence.file);
-                    if (doc) {
-                      // Only create default bounds if we don't have any bounds/regions
-                      // This prevents highlighting the entire page when we have no specific location
-                      let regions = evidence.regions;
-                      let bounds = evidence.bounds;
-                      
-                      // If we have bounds in metadata, use them
-                      if (!bounds && evidence.metadata?.bounds) {
-                        bounds = evidence.metadata.bounds;
+        <Dialog open={chatOpen} onOpenChange={setChatOpen}>
+          <DialogPortal>
+            {/* No overlay - chat is full screen */}
+            <DialogPrimitive.Content
+              className={`fixed max-w-full h-screen max-h-screen p-0 m-0 rounded-none border-0 bg-background translate-y-[-50%] top-1/2 z-50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 [&>button]:hidden transition-all duration-300 ${
+                viewerClause 
+                  ? 'w-[calc(100vw-50vw-24px)] left-0 translate-x-0' 
+                  : 'w-screen left-1/2 translate-x-[-50%]'
+              }`}
+            >
+            <div className="flex flex-col h-full w-full">
+              {/* Header */}
+              <div className="border-b border-border/50 bg-gradient-to-r from-background via-background to-muted/20 px-6 py-4 flex-shrink-0">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-primary/20 to-primary/10 border border-primary/20 flex items-center justify-center">
+                      <Sparkles className="h-5 w-5 text-primary" />
+                    </div>
+                    <div>
+                      <h2 className="text-lg font-semibold">AI Copilot</h2>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        Ask questions about your contracts
+                      </p>
+                    </div>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-9 w-9 rounded-lg"
+                    onClick={() => setChatOpen(false)}
+                  >
+                    <X className="h-5 w-5" />
+                  </Button>
+                </div>
+              </div>
+              
+              {/* Chat Content - Adjusts width when PDF viewer is open */}
+              <div className="flex-1 min-h-0 overflow-hidden">
+                <ContractChat 
+                  jobId={jobId} 
+                  vendorName={analysis?.job.vendor_name}
+                  onOpenDocument={(evidence: {
+                    type: string;
+                    file?: string;
+                    page?: number;
+                    label?: string;
+                    text?: string;
+                    bounds?: any;
+                    regions?: any[];
+                    metadata?: Record<string, any>;
+                  }) => {
+                    if (evidence.type === "contract_clause" && evidence.file) {
+                      const doc = documents.find((d) => d.filename === evidence.file);
+                      if (doc) {
+                        // Only create default bounds if we don't have any bounds/regions
+                        // This prevents highlighting the entire page when we have no specific location
+                        let regions = evidence.regions;
+                        let bounds = evidence.bounds;
+                        
+                        // If we have bounds in metadata, use them
+                        if (!bounds && evidence.metadata?.bounds) {
+                          bounds = evidence.metadata.bounds;
+                        }
+                        
+                        // If we have regions in metadata, use them
+                        if (!regions && evidence.metadata?.regions) {
+                          regions = evidence.metadata.regions;
+                        }
+                        
+                        // Only create default regions if we have absolutely no location data
+                        // This way, if there's no bounds, the page will open without highlighting
+                        if (!regions && !bounds && evidence.page) {
+                          // Don't create default bounds - let it open without highlight
+                          // The user will see the page but not a full-page highlight
+                          regions = [];
+                        } else if (!regions && bounds && evidence.page) {
+                          // If we have bounds but no regions, create a region from bounds
+                          regions = [{
+                            page: evidence.page,
+                            bounds: bounds
+                          }];
+                        }
+                        
+                        const clauseEvidence: DiscrepancyEvidence = {
+                          type: "contract_clause",
+                          label: evidence.label || "Contract Reference",
+                          text: evidence.text || "",
+                          page: evidence.page || 1,
+                          file: evidence.file,
+                          bounds: bounds,
+                          regions: regions,
+                        };
+                        openClauseReference(clauseEvidence);
                       }
-                      
-                      // If we have regions in metadata, use them
-                      if (!regions && evidence.metadata?.regions) {
-                        regions = evidence.metadata.regions;
-                      }
-                      
-                      // Only create default regions if we have absolutely no location data
-                      // This way, if there's no bounds, the page will open without highlighting
-                      if (!regions && !bounds && evidence.page) {
-                        // Don't create default bounds - let it open without highlight
-                        // The user will see the page but not a full-page highlight
-                        regions = [];
-                      } else if (!regions && bounds && evidence.page) {
-                        // If we have bounds but no regions, create a region from bounds
-                        regions = [{
-                          page: evidence.page,
-                          bounds: bounds
-                        }];
-                      }
-                      
-                      const clauseEvidence: DiscrepancyEvidence = {
-                        type: "contract_clause",
-                        label: evidence.label || "Contract Reference",
-                        text: evidence.text || "",
-                        page: evidence.page || 1,
-                        file: evidence.file,
-                        bounds: bounds,
-                        regions: regions,
-                      };
-                      openClauseReference(clauseEvidence);
                     }
-                  }
-                }}
-              />
+                  }}
+                />
+              </div>
             </div>
-          </SheetContent>
-        </Sheet>
+            </DialogPrimitive.Content>
+          </DialogPortal>
+        </Dialog>
       )}
     </div>
     </TooltipProvider>

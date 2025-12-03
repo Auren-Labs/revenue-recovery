@@ -34,6 +34,16 @@ class EmailService:
             self.smtp_from,
         ])
 
+    def send_email(
+        self,
+        to_email: str,
+        subject: str,
+        html_body: str,
+        text_body: Optional[str] = None,
+    ) -> bool:
+        """Send an email (public method)."""
+        return self._send_email(to_email, subject, html_body, text_body)
+    
     def _send_email(
         self,
         to_email: str,

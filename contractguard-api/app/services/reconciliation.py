@@ -264,8 +264,8 @@ class Discrepancy:
         """Check if this discrepancy should be surfaced to the client."""
         return self.effective_confidence() >= MINIMUM_CONFIDENCE_TO_SURFACE
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to API response format."""
+    def to_dict(self, user_type: str = "customer") -> Dict[str, Any]:
+        """Convert to API response format with mode-aware language."""
         primary_item = self.invoice_items[0] if self.invoice_items else None
         primary_invoice_date = primary_item.invoice_date.isoformat() if primary_item and primary_item.invoice_date else None
         primary_invoice_number = primary_item.invoice_number if primary_item else None
@@ -281,6 +281,9 @@ class Discrepancy:
         due_date = None
         if primary_item and primary_item.invoice_date:
             due_date = (primary_item.invoice_date + timedelta(days=30)).isoformat()
+        
+        # Adjust framing based on user type
+        is_vendor = user_type == "vendor"
         
         result = {
             "type": self.type.value,
@@ -305,11 +308,16 @@ class Discrepancy:
                     "classification": item.classification.value,
                     "confidence": round(item.effective_confidence(), 3),
                     "date_was_ambiguous": item.date_was_ambiguous,
-                    "sku": item.sku,  # NEW
+                    "sku": item.sku,
                 }
                 for item in self.invoice_items[:5]
             ],
             "recommendations": self.recommendations,
+            # Mode-aware fields
+            "action_type": "corrective_invoice" if is_vendor else "dispute_letter",
+            "action_label": "Generate Corrective Invoice" if is_vendor else "Generate Dispute Letter",
+            "impact_label": "Revenue to Recover" if is_vendor else "Potential Overpayment",
+            "perspective": user_type,
         }
         
         # Add confidence breakdown if available
@@ -969,7 +977,9 @@ async def _parse_invoice_items(
     logger.info(f"Classification: {recurring_fixed} fixed recurring, {recurring_variable} variable (overages), "
                 f"{recurring_legacy} legacy recurring, {onetime} one-time, {credits} credits, {adjustments} adjustments")
     if ambiguous_dates > 0:
-        logger.warning(f"⚠️ {ambiguous_dates} invoices have ambiguous dates - reduced confidence")
+        pct_ambiguous = (ambiguous_dates / len(items) * 100) if items else 0
+        logger.warning(f"⚠️ {ambiguous_dates} invoices ({pct_ambiguous:.1f}%) have ambiguous dates - using detected format with reduced confidence")
+        logger.info(f"   Tip: Use YYYY-MM-DD format or include dates with day > 12 to improve detection accuracy")
     
     return items
 
@@ -1639,15 +1649,24 @@ async def run(job, llm_insights: Dict) -> Dict:
     billing_rows = deduplicate_billing_rows(billing_rows)
     billing_summary = _summarize_billing(billing_rows)
     
-    # Step 2: Detect date format
+    # Step 2: Detect date format with larger sample for better accuracy
     logger.info("[2/8] Detecting date format...")
-    date_format_analysis = detect_date_format(billing_rows, _INVOICE_DATE_FIELDS)
+    # Use larger sample size (up to 200 rows) for better detection accuracy
+    sample_size = min(200, len(billing_rows))
+    date_format_analysis = detect_date_format(billing_rows, _INVOICE_DATE_FIELDS, sample_size=sample_size)
     
     if not date_format_analysis.is_reliable():
-        logger.warning(f"⚠️ Date format detection unreliable: {date_format_analysis.detected_format.value}")
+        logger.warning(f"⚠️ Date format detection unreliable: {date_format_analysis.detected_format.value} "
+                      f"(confidence: {date_format_analysis.confidence:.0%}, "
+                      f"ambiguous: {date_format_analysis.ambiguous_count}/{date_format_analysis.sample_size})")
+        if date_format_analysis.ambiguous_count > 0:
+            logger.info(f"   Using fallback format: {date_format_analysis.detected_format.value} "
+                       f"for ambiguous dates. Consider standardizing date format in source data.")
     else:
         logger.info(f"✓ Detected date format: {date_format_analysis.detected_format.value} "
-                   f"(confidence: {date_format_analysis.confidence:.0%})")
+                   f"(confidence: {date_format_analysis.confidence:.0%}, "
+                   f"sample: {date_format_analysis.sample_size}, "
+                   f"ambiguous: {date_format_analysis.ambiguous_count})")
     
     # Step 3: Extract and validate contract rules
     logger.info("[3/8] Extracting and validating contract rules...")
@@ -1735,16 +1754,38 @@ async def run(job, llm_insights: Dict) -> Dict:
     all_discrepancies = confirmed + needs_review
     
     # Calculate totals (avoid double-counting same invoice)
+    # Get user_type from job to determine perspective
+    user_type = getattr(job, 'user_type', 'customer')  # Default to customer for backward compatibility
+    
     invoice_discrepancy_map = {}
     for d in all_discrepancies:
         for item in d.invoice_items:
             if not item.invoice_date:
                 continue
             invoice_key = f"{item.invoice_number or 'N/A'}_{item.invoice_date.isoformat()}_{d.type.value}"
+            
+            # Determine if this is recoverable based on user type
+            financial_impact = d.financial_impact
+            
+            if user_type == "customer":
+                # Customer perspective: Only overcharges are recoverable (negative difference = vendor charged too much)
+                # financial_impact is positive for undercharges, negative for overcharges
+                # We want negative values (overcharges) to be positive recoverable amounts
+                if financial_impact < 0:  # Overcharge (vendor charged more than contract)
+                    recoverable_amount = abs(financial_impact)
+                else:  # Undercharge (vendor charged less) - not recoverable by customer
+                    recoverable_amount = 0
+            else:  # vendor
+                # Vendor perspective: Only undercharges are recoverable (positive difference = vendor charged too little)
+                if financial_impact > 0:  # Undercharge (vendor should have charged more)
+                    recoverable_amount = financial_impact
+                else:  # Overcharge (vendor charged too much) - not recoverable by vendor
+                    recoverable_amount = 0
+            
             if invoice_key not in invoice_discrepancy_map:
-                invoice_discrepancy_map[invoice_key] = d.financial_impact
+                invoice_discrepancy_map[invoice_key] = recoverable_amount
             else:
-                invoice_discrepancy_map[invoice_key] = max(invoice_discrepancy_map[invoice_key], d.financial_impact)
+                invoice_discrepancy_map[invoice_key] = max(invoice_discrepancy_map[invoice_key], recoverable_amount)
     
     total_recoverable = sum(invoice_discrepancy_map.values())
     
@@ -1754,21 +1795,53 @@ async def run(job, llm_insights: Dict) -> Dict:
             if not item.invoice_date:
                 continue
             invoice_key = f"{item.invoice_number or 'N/A'}_{item.invoice_date.isoformat()}_{d.type.value}"
+            
+            # Apply same logic for confirmed discrepancies
+            financial_impact = d.financial_impact
+            
+            if user_type == "customer":
+                if financial_impact < 0:  # Overcharge
+                    recoverable_amount = abs(financial_impact)
+                else:  # Undercharge
+                    recoverable_amount = 0
+            else:  # vendor
+                if financial_impact > 0:  # Undercharge
+                    recoverable_amount = financial_impact
+                else:  # Overcharge
+                    recoverable_amount = 0
+            
             if invoice_key not in confirmed_invoice_map:
-                confirmed_invoice_map[invoice_key] = d.financial_impact
+                confirmed_invoice_map[invoice_key] = recoverable_amount
             else:
-                confirmed_invoice_map[invoice_key] = max(confirmed_invoice_map[invoice_key], d.financial_impact)
+                confirmed_invoice_map[invoice_key] = max(confirmed_invoice_map[invoice_key], recoverable_amount)
     confirmed_recoverable = sum(confirmed_invoice_map.values())
     
     audit_time = (datetime.now() - start_time).total_seconds()
     
-    # Update job metrics
+    # Update job metrics with perspective-specific labels
     job.metrics["billing_summary"] = billing_summary
     job.metrics["recoverable_amount"] = round(total_recoverable, 2)
     job.metrics["confirmed_recoverable"] = round(confirmed_recoverable, 2)
     job.metrics["currency"] = rules.currency
     job.metrics["gpt4o_enhanced"] = True
     job.metrics["precision_mode"] = True
+    
+    # Add perspective-specific metadata
+    job.metrics["perspective"] = user_type
+    if user_type == "vendor":
+        job.metrics["impact_label"] = "Revenue Leakage"
+        job.metrics["action_label"] = "Generate Corrective Invoice"
+        job.metrics["summary_text"] = (
+            f"Found {len(all_discrepancies)} under-billed invoices totaling "
+            f"{rules.currency} {total_recoverable:,.2f} in recoverable revenue"
+        )
+    else:
+        job.metrics["impact_label"] = "Potential Overpayment"
+        job.metrics["action_label"] = "Generate Dispute Letter"
+        job.metrics["summary_text"] = (
+            f"Found {len(all_discrepancies)} billing errors totaling "
+            f"{rules.currency} {total_recoverable:,.2f} in potential savings"
+        )
     
     job.metrics["date_format_analysis"] = {
         "detected_format": date_format_analysis.detected_format.value,
@@ -1901,7 +1974,8 @@ async def run(job, llm_insights: Dict) -> Dict:
     }
     
     # Convert discrepancies to API format
-    job.discrepancies = [d.to_dict() for d in all_discrepancies]
+    # Convert discrepancies to dict with user_type for mode-aware language
+    job.discrepancies = [d.to_dict(user_type=user_type) for d in all_discrepancies]
     
     await rag_store.index_billing(job, job.discrepancies)
 

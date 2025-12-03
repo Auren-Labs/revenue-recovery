@@ -263,51 +263,75 @@ class AuthService:
 
     async def authenticate_google(self, google_access_token: str) -> tuple[User, Customer, str]:
         """Authenticate user with Google OAuth access token."""
+        logger.info("🔵 Starting Google authentication...")
         try:
             # Fetch user info from Google using the access token
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    "https://www.googleapis.com/oauth2/v2/userinfo",
-                    headers={"Authorization": f"Bearer {google_access_token}"},
-                    timeout=10.0
-                )
-                
-                if response.status_code != 200:
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="Invalid Google access token"
+            logger.info("🔵 Fetching user info from Google API...")
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
+                    response = await client.get(
+                        "https://www.googleapis.com/oauth2/v2/userinfo",
+                        headers={"Authorization": f"Bearer {google_access_token}"},
                     )
-                
-                user_info = response.json()
+                    
+                    if response.status_code != 200:
+                        logger.error(f"🔴 Google API returned status {response.status_code}: {response.text[:200]}")
+                        raise HTTPException(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Invalid Google access token"
+                        )
+                    
+                    user_info = response.json()
+                    logger.info(f"🔵 Successfully fetched user info from Google: {user_info.get('email', 'no email')}")
+            except httpx.TimeoutException as e:
+                logger.error(f"🔴 Timeout calling Google API: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                    detail="Google authentication timed out. Please try again."
+                )
+            except httpx.RequestError as e:
+                logger.error(f"🔴 Network error calling Google API: {e}")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Unable to connect to Google authentication service. Please try again."
+                )
             
             # Extract user info from Google
             google_email = user_info.get('email')
             google_name = user_info.get('name', '')
             
             if not google_email:
+                logger.error("🔴 Google account does not have an email address")
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Google account does not have an email address"
                 )
             
+            logger.info(f"🔵 Looking up user in database: {google_email}")
             # Check if user exists
             user = await self.get_user_by_email(google_email)
             
             if user:
                 # Existing user - update last login
+                logger.info(f"🔵 Existing user found: {user.email}")
                 if not user.is_active:
+                    logger.error(f"🔴 User account is disabled: {user.email}")
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,
                         detail="User account is disabled",
                     )
+                logger.info(f"🔵 Fetching customer: {user.customer_id}")
                 customer = await self.get_customer_by_id(user.customer_id)
                 if not customer:
+                    logger.error(f"🔴 Customer not found: {user.customer_id}")
                     raise HTTPException(
                         status_code=status.HTTP_404_NOT_FOUND,
                         detail="Customer organization not found",
                     )
+                logger.info(f"🔵 Customer found: {customer.name}")
             else:
                 # New user - create user and customer
+                logger.info(f"🔵 Creating new user and customer for: {google_email}")
                 # Create a new customer for this user
                 customer_id = str(uuid.uuid4())
                 now = datetime.utcnow()
@@ -322,7 +346,16 @@ class AuthService:
                     "updated_at": now.isoformat(),
                 }
                 
-                self.supabase.table("customers").insert(customer_db_data).execute()
+                logger.info(f"🔵 Inserting customer into database...")
+                try:
+                    self.supabase.table("customers").insert(customer_db_data).execute()
+                    logger.info(f"🔵 Customer created successfully: {customer_id}")
+                except Exception as e:
+                    logger.error(f"🔴 Failed to create customer: {e}", exc_info=True)
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Failed to create customer organization"
+                    )
                 
                 # Create Customer object with datetime objects
                 customer = Customer(
@@ -349,7 +382,16 @@ class AuthService:
                     "updated_at": now.isoformat(),
                 }
                 
-                self.supabase.table("users").insert(user_db_data).execute()
+                logger.info(f"🔵 Inserting user into database...")
+                try:
+                    self.supabase.table("users").insert(user_db_data).execute()
+                    logger.info(f"🔵 User created successfully: {user_id}")
+                except Exception as e:
+                    logger.error(f"🔴 Failed to create user: {e}", exc_info=True)
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Failed to create user account"
+                    )
                 
                 # Create User object with datetime objects
                 user = User(
@@ -371,19 +413,27 @@ class AuthService:
             except Exception as e:
                 logger.warning(f"Failed to update last login: {e}")
             
+            logger.info(f"🔵 Creating access token for user: {user.email}")
             token = self.create_access_token(user, customer)
+            logger.info(f"✅ Google authentication successful for: {user.email}")
             return user, customer, token
             
         except HTTPException:
             raise
-        except httpx.HTTPError as e:
-            logger.error(f"Google API request failed: {e}")
+        except httpx.TimeoutException as e:
+            logger.error(f"🔴 Timeout calling Google API: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="Google authentication timed out. Please try again."
+            )
+        except httpx.RequestError as e:
+            logger.error(f"🔴 Network error calling Google API: {e}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Failed to connect to Google API",
+                detail="Unable to connect to Google authentication service. Please try again."
             )
         except Exception as e:
-            logger.error(f"Google authentication failed: {e}")
+            logger.error(f"🔴 Google authentication failed: {e}", exc_info=True)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Google authentication failed: {str(e)}",

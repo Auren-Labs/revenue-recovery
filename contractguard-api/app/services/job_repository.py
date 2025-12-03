@@ -30,7 +30,7 @@ def _default_stages():
     ]
 
 
-def create_job_record(vendor_name: str, organization_id: Optional[str]) -> Job:
+def create_job_record(vendor_name: str, organization_id: Optional[str], user_type: str = "customer") -> Job:
     """Create a new job record. Returns Job object."""
     client = _client()
     if not client:
@@ -38,19 +38,37 @@ def create_job_record(vendor_name: str, organization_id: Optional[str]) -> Job:
     
     job_id = str(uuid4())
     now = datetime.utcnow().isoformat()
+    
+    # Validate user_type
+    if user_type not in ["customer", "vendor"]:
+        user_type = "customer"  # Default to customer if invalid
 
     try:
         # Create job with timeout protection
-        logger.info(f"Creating job {job_id} for vendor {vendor_name}")
-        client.table("jobs").insert(
-            {
-                "id": job_id,
-                "vendor_name": vendor_name,
-                "customer_id": organization_id,  # Use customer_id (matches DB schema)
-                "created_at": now,
-                "updated_at": now,
-            }
-        ).execute()
+        logger.info(f"Creating job {job_id} for vendor {vendor_name} (user_type: {user_type})")
+        
+        # Build insert data
+        insert_data = {
+            "id": job_id,
+            "vendor_name": vendor_name,
+            "customer_id": organization_id,  # Use customer_id (matches DB schema)
+            "created_at": now,
+            "updated_at": now,
+        }
+        
+        # Try to include user_type, but handle if column doesn't exist yet
+        try:
+            insert_data["user_type"] = user_type
+            client.table("jobs").insert(insert_data).execute()
+        except Exception as e:
+            error_msg = str(e)
+            if "user_type" in error_msg.lower() or "column" in error_msg.lower():
+                # Column doesn't exist yet - try without user_type
+                logger.warning(f"user_type column not found in database. Please run migration: supabase/migrations/20241201000000_add_user_type_to_jobs.sql")
+                insert_data.pop("user_type", None)
+                client.table("jobs").insert(insert_data).execute()
+            else:
+                raise
 
         stage_rows = []
         for stage in _default_stages():
@@ -114,6 +132,7 @@ def load_job(job_id: str, organization_id: Optional[str] = None) -> Job | None:
         status=job_row.get("status", "queued"),
         message=job_row.get("message"),
         customer_id=job_row.get("customer_id"),
+        user_type=job_row.get("user_type") or "customer",  # Default to customer for backward compatibility
         metrics=metrics or {},
         stages=[
             {

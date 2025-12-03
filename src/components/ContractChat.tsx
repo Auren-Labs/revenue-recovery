@@ -2,11 +2,13 @@ import { useState, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Send, Loader2, FileText, MessageSquare } from "lucide-react";
+import { Send, Loader2, FileText, MessageSquare, Copy, Check, Sparkles, Bot, User, X } from "lucide-react";
 import { getAuthHeader } from "@/utils/auth";
 import { useToast } from "@/components/ui/use-toast";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { motion, AnimatePresence } from "framer-motion";
+import { format } from "date-fns";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 
@@ -43,6 +45,7 @@ export const ContractChat = ({ jobId, vendorName, onOpenDocument }: ContractChat
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const markdownRefs = useRef<Map<number, HTMLDivElement>>(new Map());
@@ -235,79 +238,125 @@ export const ContractChat = ({ jobId, vendorName, onOpenDocument }: ContractChat
     }
   };
 
+  const handleCopyMessage = async (messageIndex: number) => {
+    const message = messages[messageIndex];
+    if (message) {
+      await navigator.clipboard.writeText(message.content);
+      setCopiedMessageId(messageIndex);
+      toast({
+        title: "Copied!",
+        description: "Message copied to clipboard",
+      });
+      setTimeout(() => setCopiedMessageId(null), 2000);
+    }
+  };
+
+  const suggestedQuestions = [
+    "What's my escalation rate?",
+    "When is the renewal deadline?",
+    "What are the key pricing terms?",
+    "What SLA credits am I entitled to?",
+    "Show me the pricing timeline",
+  ];
+
   return (
-    <div className="h-full flex flex-col overflow-hidden bg-gradient-to-b from-background to-muted/20">
-      {/* Header */}
-      <div className="flex-shrink-0 border-b bg-card/50 backdrop-blur-sm px-6 py-4">
-        <div className="flex items-center gap-3">
-          <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-primary/20 to-primary/10 flex items-center justify-center border border-primary/20">
-            <MessageSquare className="h-5 w-5 text-primary" />
-          </div>
-          <div className="flex-1">
-            <h3 className="font-semibold text-foreground">Contract Assistant</h3>
-            {vendorName && (
-              <p className="text-xs text-muted-foreground mt-0.5">{vendorName}</p>
-            )}
-          </div>
-        </div>
-      </div>
-      
+    <div className="h-full flex flex-col overflow-hidden bg-gradient-to-br from-background via-background to-muted/10">
       {/* Messages Area */}
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
         <ScrollArea className="flex-1">
-          <div className="space-y-6 px-6 py-6" ref={scrollRef}>
+          <div className="space-y-4 px-4 sm:px-6 py-6" ref={scrollRef}>
             {messages.length === 0 && (
-              <div className="text-center py-12">
-                <div className="inline-flex h-16 w-16 rounded-2xl bg-gradient-to-br from-primary/10 to-primary/5 border border-primary/20 items-center justify-center mb-6">
-                  <MessageSquare className="h-8 w-8 text-primary/60" />
-                </div>
-                <h3 className="font-semibold text-foreground mb-2">Ask questions about your contracts</h3>
-                <p className="text-sm text-muted-foreground mb-6">
+              <motion.div
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="text-center py-12 max-w-md mx-auto"
+              >
+                <motion.div
+                  initial={{ scale: 0.8 }}
+                  animate={{ scale: 1 }}
+                  transition={{ delay: 0.1, type: "spring" }}
+                  className="inline-flex h-20 w-20 rounded-3xl bg-gradient-to-br from-primary/20 via-primary/10 to-primary/5 border-2 border-primary/30 items-center justify-center mb-6 shadow-lg shadow-primary/10"
+                >
+                  <Bot className="h-10 w-10 text-primary" />
+                </motion.div>
+                <motion.h3
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ delay: 0.2 }}
+                  className="text-xl font-semibold text-foreground mb-2"
+                >
+                  Ask AI Copilot
+                </motion.h3>
+                <motion.p
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ delay: 0.3 }}
+                  className="text-sm text-muted-foreground mb-8"
+                >
                   Get instant answers about pricing, escalations, and contract terms
-                </p>
-                <div className="flex flex-wrap gap-2 justify-center">
-                  <button
-                    onClick={() => setInput("What's my escalation rate?")}
-                    className="text-xs px-3 py-1.5 rounded-full bg-muted hover:bg-muted/80 text-muted-foreground transition-colors border border-border/50"
-                  >
-                    What's my escalation rate?
-                  </button>
-                  <button
-                    onClick={() => setInput("When is the renewal deadline?")}
-                    className="text-xs px-3 py-1.5 rounded-full bg-muted hover:bg-muted/80 text-muted-foreground transition-colors border border-border/50"
-                  >
-                    When is the renewal deadline?
-                  </button>
-                  <button
-                    onClick={() => setInput("What are the key pricing terms?")}
-                    className="text-xs px-3 py-1.5 rounded-full bg-muted hover:bg-muted/80 text-muted-foreground transition-colors border border-border/50"
-                  >
-                    What are the key pricing terms?
-                  </button>
+                </motion.p>
+                <div className="flex flex-col gap-2">
+                  {suggestedQuestions.map((question, idx) => (
+                    <motion.button
+                      key={question}
+                      initial={{ opacity: 0, x: -20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: 0.4 + idx * 0.1 }}
+                      onClick={() => setInput(question)}
+                      className="text-left text-sm px-4 py-3 rounded-xl bg-card hover:bg-muted/50 text-foreground transition-all duration-200 border border-border/50 hover:border-primary/30 hover:shadow-sm group"
+                    >
+                      <div className="flex items-center gap-3">
+                        <Sparkles className="h-4 w-4 text-primary/60 group-hover:text-primary transition-colors" />
+                        <span>{question}</span>
+                      </div>
+                    </motion.button>
+                  ))}
                 </div>
-              </div>
+              </motion.div>
             )}
 
-            {messages.map((message, idx) => (
-              <div
-                key={idx}
-                className={`flex gap-3 ${
-                  message.role === "user" ? "justify-end" : "justify-start"
-                }`}
-              >
-                {message.role === "assistant" && (
-                  <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-primary/20 to-primary/10 border border-primary/20 flex items-center justify-center flex-shrink-0 shadow-sm">
-                    <MessageSquare className="h-4 w-4 text-primary" />
-                  </div>
-                )}
-
-                <div
-                  className={`max-w-[85%] rounded-2xl px-4 py-3 shadow-sm ${
-                    message.role === "user"
-                      ? "bg-gradient-to-br from-primary to-primary/90 text-primary-foreground"
-                      : "bg-card border border-border/50 backdrop-blur-sm"
+            <AnimatePresence>
+              {messages.map((message, idx) => (
+                <motion.div
+                  key={idx}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, scale: 0.95 }}
+                  transition={{ duration: 0.2 }}
+                  className={`flex gap-3 group ${
+                    message.role === "user" ? "justify-end" : "justify-start"
                   }`}
                 >
+                  {message.role === "assistant" && (
+                    <div className="h-10 w-10 rounded-2xl bg-gradient-to-br from-primary/20 to-primary/10 border border-primary/20 flex items-center justify-center flex-shrink-0 shadow-sm ring-1 ring-primary/10">
+                      <Bot className="h-5 w-5 text-primary" />
+                    </div>
+                  )}
+
+                  <div className="flex flex-col gap-1 max-w-[85%] sm:max-w-[75%]">
+                    <div
+                      className={`relative rounded-2xl px-4 py-3 shadow-sm transition-all duration-200 ${
+                        message.role === "user"
+                          ? "bg-gradient-to-br from-primary to-primary/90 text-primary-foreground rounded-br-md"
+                          : "bg-card border border-border/50 backdrop-blur-sm rounded-bl-md hover:border-border"
+                      }`}
+                    >
+                      {/* Copy button */}
+                      <button
+                        onClick={() => handleCopyMessage(idx)}
+                        className={`absolute top-2 right-2 p-1.5 rounded-lg transition-all duration-200 ${
+                          message.role === "user"
+                            ? "text-primary-foreground/60 hover:text-primary-foreground hover:bg-primary-foreground/20"
+                            : "text-muted-foreground hover:text-foreground hover:bg-muted opacity-0 group-hover:opacity-100"
+                        }`}
+                        title="Copy message"
+                      >
+                        {copiedMessageId === idx ? (
+                          <Check className="h-3.5 w-3.5" />
+                        ) : (
+                          <Copy className="h-3.5 w-3.5" />
+                        )}
+                      </button>
                   {message.role === "assistant" ? (
                     <div className="prose prose-sm dark:prose-invert max-w-none prose-headings:mt-2 prose-headings:mb-2 prose-p:my-2 prose-ul:my-2 prose-ol:my-2 prose-li:my-1">
                       <div 
@@ -427,53 +476,87 @@ export const ContractChat = ({ jobId, vendorName, onOpenDocument }: ContractChat
                         
                       </div>
                     </div>
-                  ) : (
-                    <div className="whitespace-pre-wrap">{message.content}</div>
-                  )}
-                </div>
-
-                {message.role === "user" && (
-                  <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-primary to-primary/90 flex items-center justify-center flex-shrink-0 shadow-sm">
-                    <span className="text-xs font-semibold text-primary-foreground">You</span>
+                      ) : (
+                        <div className="whitespace-pre-wrap text-sm leading-relaxed pr-8">{message.content}</div>
+                      )}
+                    </div>
+                    
+                    {/* Timestamp */}
+                    <div className={`text-xs text-muted-foreground px-1 ${message.role === "user" ? "text-right" : "text-left"}`}>
+                      {format(new Date(), "h:mm a")}
+                    </div>
                   </div>
-                )}
-              </div>
-            ))}
+
+                  {message.role === "user" && (
+                    <div className="h-10 w-10 rounded-2xl bg-gradient-to-br from-primary to-primary/90 flex items-center justify-center flex-shrink-0 shadow-sm ring-1 ring-primary/20">
+                      <User className="h-5 w-5 text-primary-foreground" />
+                    </div>
+                  )}
+                </motion.div>
+              ))}
+            </AnimatePresence>
 
             {isLoading && (
-              <div className="flex gap-3 justify-start">
-                <div className="h-9 w-9 rounded-xl bg-gradient-to-br from-primary/20 to-primary/10 border border-primary/20 flex items-center justify-center flex-shrink-0 shadow-sm">
-                  <MessageSquare className="h-4 w-4 text-primary" />
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="flex gap-3 justify-start"
+              >
+                <div className="h-10 w-10 rounded-2xl bg-gradient-to-br from-primary/20 to-primary/10 border border-primary/20 flex items-center justify-center flex-shrink-0 shadow-sm ring-1 ring-primary/10">
+                  <Bot className="h-5 w-5 text-primary" />
                 </div>
-                <div className="bg-card border border-border/50 rounded-2xl px-4 py-3 shadow-sm">
-                  <div className="flex items-center gap-2">
-                    <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                    <span className="text-sm text-muted-foreground">Thinking...</span>
+                <div className="bg-card border border-border/50 rounded-2xl rounded-bl-md px-4 py-3 shadow-sm">
+                  <div className="flex items-center gap-3">
+                    <div className="flex gap-1">
+                      <motion.div
+                        className="h-2 w-2 rounded-full bg-primary"
+                        animate={{ y: [0, -4, 0] }}
+                        transition={{ duration: 0.6, repeat: Infinity, delay: 0 }}
+                      />
+                      <motion.div
+                        className="h-2 w-2 rounded-full bg-primary"
+                        animate={{ y: [0, -4, 0] }}
+                        transition={{ duration: 0.6, repeat: Infinity, delay: 0.2 }}
+                      />
+                      <motion.div
+                        className="h-2 w-2 rounded-full bg-primary"
+                        animate={{ y: [0, -4, 0] }}
+                        transition={{ duration: 0.6, repeat: Infinity, delay: 0.4 }}
+                      />
+                    </div>
+                    <span className="text-sm text-muted-foreground">AI is thinking...</span>
                   </div>
                 </div>
-              </div>
+              </motion.div>
             )}
             <div ref={messagesEndRef} />
           </div>
         </ScrollArea>
 
         {/* Input Area */}
-        <div className="flex-shrink-0 border-t bg-card/50 backdrop-blur-sm px-6 py-4">
+        <div className="flex-shrink-0 border-t border-border/50 bg-gradient-to-t from-background via-background to-background/95 backdrop-blur-xl px-4 sm:px-6 py-4">
           <div className="flex gap-3 items-end">
             <div className="flex-1 relative">
               <Textarea
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyPress={handleKeyPress}
-                placeholder="Ask about your contracts..."
-                className="min-h-[56px] max-h-[120px] resize-none pr-12 rounded-xl border-border/50 bg-background/50 backdrop-blur-sm focus:bg-background transition-colors"
+                placeholder="Ask about your contracts, pricing, escalations..."
+                className="min-h-[60px] max-h-[140px] resize-none pr-20 rounded-2xl border-border/50 bg-card/80 backdrop-blur-sm focus:bg-card focus:border-primary/50 transition-all duration-200 text-sm leading-relaxed shadow-sm"
                 disabled={isLoading}
               />
-              <div className="absolute bottom-2 right-2 text-xs text-muted-foreground">
+              <div className="absolute bottom-3 right-3 flex items-center gap-2">
+                {input.trim() && (
+                  <span className="text-xs text-muted-foreground opacity-60">
+                    {input.length} chars
+                  </span>
+                )}
                 {isLoading ? (
-                  <Loader2 className="h-3 w-3 animate-spin" />
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
                 ) : (
-                  <span className="opacity-50">Enter to send</span>
+                  <span className="text-xs text-muted-foreground opacity-50">
+                    Enter to send
+                  </span>
                 )}
               </div>
             </div>
@@ -481,7 +564,7 @@ export const ContractChat = ({ jobId, vendorName, onOpenDocument }: ContractChat
               onClick={handleSend}
               disabled={!input.trim() || isLoading}
               size="icon"
-              className="h-[56px] w-[56px] shrink-0 rounded-xl shadow-sm bg-gradient-to-br from-primary to-primary/90 hover:from-primary/90 hover:to-primary/80"
+              className="h-[60px] w-[60px] shrink-0 rounded-2xl shadow-lg bg-gradient-to-br from-primary to-primary/90 hover:from-primary/90 hover:to-primary/80 transition-all duration-200 hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
             >
               {isLoading ? (
                 <Loader2 className="h-5 w-5 animate-spin" />
@@ -490,6 +573,11 @@ export const ContractChat = ({ jobId, vendorName, onOpenDocument }: ContractChat
               )}
             </Button>
           </div>
+          {messages.length > 0 && (
+            <div className="mt-2 text-xs text-center text-muted-foreground opacity-60">
+              AI responses may include inaccuracies. Always verify important information.
+            </div>
+          )}
         </div>
       </div>
     </div>

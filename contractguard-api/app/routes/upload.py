@@ -14,6 +14,7 @@ router = APIRouter()
 @router.post("/contracts", response_model=UploadResponse)
 async def upload_contracts(
     vendor_name: str = Form(...),
+    user_type: str = Form("customer"),  # "customer" or "vendor"
     files: List[UploadFile] = File(..., description="MSA, SOWs, amendments"),
     current_user=Depends(require_user),
 ) -> UploadResponse:
@@ -32,11 +33,16 @@ async def upload_contracts(
         # Create job in async-safe way with timeout
         logger.info("Creating job record...")
         try:
+            # Validate user_type
+            if user_type not in ["customer", "vendor"]:
+                user_type = "customer"  # Default to customer if invalid
+            
             job = await asyncio.wait_for(
                 asyncio.to_thread(
                     job_manager.create_job,
                     vendor_name,
-                    current_user.get("organization_id")
+                    current_user.get("organization_id"),
+                    user_type
                 ),
                 timeout=10.0  # 10 second timeout for job creation
             )
@@ -378,7 +384,7 @@ async def job_status(job_id: str, current_user=Depends(require_user)) -> JobStat
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     
-    return JobStatus(
+    job_status = JobStatus(
         job_id=job.id,
         created_at=job.created_at,
         status=job.status,
@@ -387,5 +393,9 @@ async def job_status(job_id: str, current_user=Depends(require_user)) -> JobStat
         metrics=job.metrics,
         progress=job.metrics.get("progress"),
         progress_message=job.metrics.get("progress_message"),
+        vendor_name=job.vendor_name,
+        user_type=getattr(job, 'user_type', 'customer'),
     )
+    
+    return job_status
 

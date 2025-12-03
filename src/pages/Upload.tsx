@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback } from "react";
+import { useMemo, useState, useCallback, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useDropzone } from "react-dropzone";
 import { getAuthHeader, logout } from "@/utils/auth";
@@ -21,6 +21,11 @@ import {
   FileSpreadsheet,
   Archive,
   ChevronRight,
+  RefreshCw,
+  Coins,
+  TrendingUp,
+  Info,
+  Mail,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -58,17 +63,86 @@ type ReconProgress = {
   message?: string;
 };
 
+// Tips for customer vs vendor mode
+const customerTips = [
+  "Pro Tip: Schedule monthly audits to catch 20% more leakage",
+  "Did you know? Most overcharges occur during renewal periods",
+  "Best Practice: Review discrepancies within 30 days for faster recovery",
+  "Insight: Contracts with CPI escalations have 3x higher error rates",
+];
+
+const vendorTips = [
+  "Pro Tip: True-up under-bills before renewal to maximize revenue",
+  "Did you know? Missing escalations cost vendors 2-5% of ARR annually",
+  "Best Practice: Audit all customers quarterly to prevent revenue leakage",
+  "Insight: Volume tier discounts are the #1 source of billing errors",
+];
+
 const UploadPage = () => {
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [vendorName, setVendorName] = useState("");
+  const [userType, setUserType] = useState<"customer" | "vendor">("customer");
   const [jobId, setJobId] = useState<string | null>(null);
+  const [savedUserType, setSavedUserType] = useState<"customer" | "vendor">("customer"); // Store user_type when job is created
   const [contractFiles, setContractFiles] = useState<File[]>([]);
   const [billingFiles, setBillingFiles] = useState<File[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [currentStage, setCurrentStage] = useState<Stage | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [reconProgress, setReconProgress] = useState<ReconProgress | null>(null);
+  const [extractionPreview, setExtractionPreview] = useState<{clauses?: number; pricing?: number; sla?: number} | null>(null);
+  const [eta, setEta] = useState<number | null>(null);
+  const [currentTipIndex, setCurrentTipIndex] = useState(0);
+  const [stallTime, setStallTime] = useState(0);
+  const [showRetry, setShowRetry] = useState(false);
+  const [jobStartTime, setJobStartTime] = useState<number | null>(null);
+  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const navigate = useNavigate();
+
+  // Tips carousel rotation - Slower, more elegant
+  useEffect(() => {
+    if (step === 3 && isUploading && (reconProgress?.percent ?? 0) > 0.1) {
+      const tipInterval = setInterval(() => {
+        setCurrentTipIndex((prev) => {
+          const tips = savedUserType === "customer" ? customerTips : vendorTips;
+          return (prev + 1) % tips.length;
+        });
+      }, 12000); // Rotate every 12 seconds for smoother experience
+      return () => clearInterval(tipInterval);
+    }
+  }, [step, isUploading, savedUserType, reconProgress?.percent]);
+
+  // ETA calculation based on progress
+  useEffect(() => {
+    if (step === 3 && isUploading && jobStartTime && reconProgress?.percent) {
+      const elapsed = (Date.now() - jobStartTime) / 1000; // seconds
+      const progress = reconProgress.percent;
+      if (progress > 0.05) { // Only calculate after 5% progress
+        const estimatedTotal = elapsed / progress;
+        const remaining = estimatedTotal - elapsed;
+        setEta(Math.max(0, Math.round(remaining)));
+      }
+    }
+  }, [step, isUploading, jobStartTime, reconProgress?.percent]);
+
+  // Stall detection
+  useEffect(() => {
+    if (step === 3 && isUploading) {
+      const stallCheck = setInterval(() => {
+        setStallTime((prev) => {
+          const newTime = prev + 1;
+          if (newTime > 120) { // 2 minutes
+            setShowRetry(true);
+          }
+          return newTime;
+        });
+      }, 1000);
+      return () => clearInterval(stallCheck);
+    } else {
+      setStallTime(0);
+      setShowRetry(false);
+    }
+  }, [step, isUploading]);
 
   const onDropContracts = useCallback((acceptedFiles: File[]) => {
     setContractFiles((prev) => [...prev, ...acceptedFiles]);
@@ -121,6 +195,7 @@ const UploadPage = () => {
         }
         const formData = new FormData();
         formData.append("vendor_name", vendorName);
+        formData.append("user_type", userType);
         contractFiles.forEach((file) => formData.append("files", file));
         const res = await fetch(`${API_BASE}/upload/contracts`, {
           method: "POST",
@@ -133,6 +208,7 @@ const UploadPage = () => {
         }
         const data = await res.json();
         setJobId(data.job_id);
+        setSavedUserType(userType); // Save user_type when job is created
         setStep(2);
         setReconProgress(null);
         setMessage(null);
@@ -160,6 +236,11 @@ const UploadPage = () => {
     setIsUploading(true);
     setCurrentStage("upload");
     setReconProgress(null);
+    setJobStartTime(Date.now());
+    setStallTime(0);
+    setShowRetry(false);
+    setExtractionPreview(null);
+    setEta(null);
     try {
       const res = await fetch(`${API_BASE}/upload/${job}/submit`, {
         method: "POST",
@@ -176,12 +257,51 @@ const UploadPage = () => {
         const statusRes = await fetch(`${API_BASE}/upload/${job}/status`, {
           headers: getAuthHeader(),
         });
-        if (!statusRes.ok) return;
+        if (!statusRes.ok) {
+          if (stallTime > 60) {
+            setShowRetry(true);
+          }
+          return;
+        }
         const data = await statusRes.json();
         const activeStage =
           (data.stages.find((s: any) => s.status === "in_progress")?.name ??
             data.stages.find((s: any) => s.status === "pending")?.name) as Stage | undefined;
-        if (activeStage) setCurrentStage(activeStage);
+        if (activeStage) {
+          setCurrentStage(activeStage);
+          setStallTime(0); // Reset stall time on progress
+        }
+        
+        // Extract preview data from metrics for dynamic progress - Only update when meaningful
+        if (data.metrics && currentStage === "llm_extraction") {
+          const clauseDist = data.metrics.clause_distribution || {};
+          const clauses = data.metrics.total_clauses || Object.values(clauseDist).reduce((sum: number, val: any) => sum + (typeof val === 'number' ? val : 0), 0);
+          const pricing = data.metrics.gpt4o_rules ? 100 : (clauseDist.pricing || clauseDist.escalation ? 50 : 0);
+          const sla = clauseDist.sla ? 100 : (clauseDist.sla_credits ? 50 : 0);
+          
+          // Only update if we have meaningful new data (avoid flickering)
+          if (clauses > 0 || pricing > 0 || sla > 0) {
+            setExtractionPreview(prev => {
+              // Only update if values actually changed to prevent unnecessary re-renders
+              const newClauses = clauses || prev?.clauses || 0;
+              const newPricing = pricing || prev?.pricing || 0;
+              const newSla = sla || prev?.sla || 0;
+              
+              if (prev && prev.clauses === newClauses && prev.pricing === newPricing && prev.sla === newSla) {
+                return prev; // No change, return previous to prevent re-render
+              }
+              
+              return {
+                clauses: newClauses,
+                pricing: newPricing,
+                sla: newSla,
+              };
+            });
+          }
+        } else if (currentStage !== "llm_extraction") {
+          // Clear preview when not in extraction stage
+          setExtractionPreview(null);
+        }
         
         // Use new progress fields
         if (data.progress !== undefined || data.progress_message) {
@@ -199,19 +319,35 @@ const UploadPage = () => {
           setCurrentStage(null);
           setMessage("Audit complete. Redirecting to dashboard...");
           setReconProgress({ percent: 1, message: "Complete!" });
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current);
+          }
           setTimeout(() => navigate(`/dashboard?job=${job}`), 1500);
         } else if (data.status === "failed") {
           setIsUploading(false);
           setMessage(data.message || "Audit failed. Please retry.");
           setReconProgress(null);
+          setShowRetry(true);
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current);
+          }
         } else {
-          setTimeout(poll, 2000); // Poll every 2 seconds
+          pollIntervalRef.current = setTimeout(poll, 2000); // Poll every 2 seconds
         }
       };
       poll();
     } catch (error: any) {
       setIsUploading(false);
       setMessage(error.message || "Something went wrong starting the audit.");
+      setShowRetry(true);
+    }
+  };
+
+  const handleRetry = () => {
+    if (jobId) {
+      setShowRetry(false);
+      setStallTime(0);
+      startAudit(jobId);
     }
   };
 
@@ -368,18 +504,60 @@ const UploadPage = () => {
             </div>
 
             <div className="rounded-3xl border border-border/50 bg-card/90 backdrop-blur-sm p-8 space-y-6 shadow-lg">
+              {/* User Type Toggle */}
+              <div className="space-y-2">
+                <label className="text-sm font-semibold text-foreground block">
+                  Audit Perspective
+                </label>
+                <div className="flex gap-2 p-1 rounded-xl border border-border/50 bg-background/50">
+                  <button
+                    type="button"
+                    onClick={() => setUserType("customer")}
+                    className={`flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-all ${
+                      userType === "customer"
+                        ? "bg-primary text-primary-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    I'm a Customer
+                    <span className="block text-xs mt-0.5 opacity-80">
+                      Finding overcharges from vendors
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setUserType("vendor")}
+                    className={`flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-all ${
+                      userType === "vendor"
+                        ? "bg-primary text-primary-foreground shadow-sm"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    I'm a Vendor
+                    <span className="block text-xs mt-0.5 opacity-80">
+                      Finding revenue leakage (undercharges)
+                    </span>
+                  </button>
+                </div>
+              </div>
+
               {/* Vendor name input */}
               <div className="space-y-2">
                 <label className="text-sm font-semibold text-foreground block">
-                  Vendor name
+                  {userType === "customer" ? "Vendor name" : "Your company name"}
                 </label>
                 <input
                   type="text"
                   value={vendorName}
                   onChange={(e) => setVendorName(e.target.value)}
-                  placeholder="e.g. Acme Cloud"
+                  placeholder={userType === "customer" ? "e.g. Acme Cloud" : "e.g. TechServices India"}
                   className="w-full h-11 rounded-xl border border-border/50 bg-background/50 px-4 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 focus:bg-background transition-colors"
                 />
+                <p className="text-xs text-muted-foreground">
+                  {userType === "customer"
+                    ? "Name of the vendor/service provider you're auditing"
+                    : "Your company name (the vendor being audited)"}
+                </p>
               </div>
               
               {/* Divider */}
@@ -582,8 +760,8 @@ const UploadPage = () => {
                 />
               </div>
               
-              <div className="relative h-40 w-40 drop-shadow-2xl">
-                <svg className="transform -rotate-90 h-40 w-40" viewBox="0 0 140 140">
+              <div className="relative h-40 w-40 drop-shadow-2xl" role="progressbar" aria-valuenow={Math.round((reconProgress?.percent ?? 0) * 100)} aria-valuemin={0} aria-valuemax={100} aria-label={`Loading: ${Math.round((reconProgress?.percent ?? 0) * 100)}% complete`}>
+                <svg className="transform -rotate-90 h-40 w-40" viewBox="0 0 140 140" aria-hidden="true">
                   {/* Background circle - thicker */}
                   <circle
                     cx="70"
@@ -660,33 +838,127 @@ const UploadPage = () => {
               )}
             </div>
 
-            <div className="relative z-10 space-y-3">
-              <p className="text-xs uppercase tracking-[0.4em] text-muted-foreground font-semibold">ContractGuard pipeline</p>
-              <h3 className="text-4xl md:text-5xl font-bold bg-gradient-to-r from-foreground via-foreground/90 to-foreground/70 bg-clip-text text-transparent">
-                Audit in progress
-              </h3>
+            {/* Compact Header - Single Line */}
+            <div className="relative z-10 space-y-2 text-center">
+              <div className="flex items-center justify-center gap-3 flex-wrap">
+                <div className={`flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border transition-all duration-300 ${
+                  savedUserType === "customer"
+                    ? "bg-primary/5 border-primary/20 text-primary/80"
+                    : "bg-cta/5 border-cta/20 text-cta/80"
+                }`}>
+                  {savedUserType === "customer" ? (
+                    <>
+                      <ShieldCheck className="h-3 w-3" aria-hidden="true" />
+                      <span className="text-xs font-medium">Cost Defense</span>
+                    </>
+                  ) : (
+                    <>
+                      <Coins className="h-3 w-3" aria-hidden="true" />
+                      <span className="text-xs font-medium">Revenue Guard</span>
+                    </>
+                  )}
+                </div>
+                <span className="text-xs text-muted-foreground/30">•</span>
+                <h3 className="text-2xl md:text-3xl font-bold text-foreground">
+                  Audit in progress
+                </h3>
+              </div>
+              
+              {/* Combined Progress Info - Single Compact Line */}
+              <div className="flex items-center justify-center gap-2.5 flex-wrap text-xs text-muted-foreground/70">
+                {reconProgress?.message && (
+                  <div className="flex items-center gap-1.5" role="status" aria-live="polite">
+                    <Sparkles className="h-3 w-3 text-primary/60" aria-hidden="true" />
+                    <span>{reconProgress.message}</span>
+                  </div>
+                )}
+                
+                {extractionPreview && currentStage === "llm_extraction" && (
+                  <>
+                    {reconProgress?.message && <span className="text-muted-foreground/20">•</span>}
+                    {extractionPreview.clauses && extractionPreview.clauses > 0 && (
+                      <span>{extractionPreview.clauses} {extractionPreview.clauses === 1 ? 'clause' : 'clauses'}</span>
+                    )}
+                    {extractionPreview.pricing > 0 && (
+                      <>
+                        <span className="text-muted-foreground/20">•</span>
+                        <span>Pricing: {extractionPreview.pricing}%</span>
+                      </>
+                    )}
+                    {extractionPreview.sla > 0 && (
+                      <>
+                        <span className="text-muted-foreground/20">•</span>
+                        <span>SLA: {extractionPreview.sla}%</span>
+                      </>
+                    )}
+                  </>
+                )}
+                
+                {isUploading && eta !== null && eta > 0 && eta < 120 && (
+                  <>
+                    {(reconProgress?.message || extractionPreview) && <span className="text-muted-foreground/20">•</span>}
+                    <div className="flex items-center gap-1">
+                      <Clock className="h-3 w-3" aria-hidden="true" />
+                      <span>~{eta}s</span>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* Tips Carousel - Compact, Inline */}
+              {isUploading && (reconProgress?.percent ?? 0) > 0.1 && (
+                <div className="relative z-10 w-full max-w-md mx-auto">
+                  <div className="relative h-7 overflow-hidden rounded-md bg-muted/10 border border-border/10" role="region" aria-label="Helpful tips">
+                    <div className="absolute inset-0 flex items-center px-3">
+                      {(savedUserType === "customer" ? customerTips : vendorTips).map((tip, idx) => (
+                        <div 
+                          key={idx}
+                          className={`flex-shrink-0 w-full flex items-center gap-1.5 transition-all duration-700 ease-in-out ${
+                            idx === currentTipIndex 
+                              ? 'opacity-100 translate-x-0' 
+                              : 'opacity-0 absolute translate-x-4'
+                          }`}
+                          role="status"
+                          aria-live="polite"
+                          aria-hidden={idx !== currentTipIndex}
+                        >
+                          <Info className="h-2.5 w-2.5 text-muted-foreground/40 flex-shrink-0" aria-hidden="true" />
+                          <p className="text-xs text-muted-foreground/60 text-center flex-1 leading-tight truncate">{tip}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
-            
-            {/* Progress Message with AI indicator */}
-            {reconProgress?.message && (
-              <div className="relative z-10 px-5 py-3 rounded-xl bg-gradient-to-r from-primary/10 via-primary/5 to-primary/10 border border-primary/30 text-sm text-foreground/90 max-w-2xl backdrop-blur-sm">
-                <div className="flex items-center gap-2 justify-center">
-                  <Sparkles className="h-4 w-4 text-primary animate-pulse" />
-                  <span>{reconProgress.message}</span>
+
+            {/* Error-Resilient Fallback - Compact */}
+            {showRetry && (
+              <div className="relative z-10 w-full max-w-xl mx-auto animate-in slide-in-from-bottom-4 fade-in duration-500">
+                <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-3">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="h-3.5 w-3.5 text-destructive/80 flex-shrink-0" aria-hidden="true" />
+                    <div className="flex-1">
+                      <p className="text-xs font-medium text-destructive/90">Taking longer than expected</p>
+                      {stallTime > 0 && (
+                        <p className="text-xs text-muted-foreground/70 mt-0.5">
+                          No progress for {Math.floor(stallTime / 60)}m {stallTime % 60}s
+                        </p>
+                      )}
+                    </div>
+                    <Button 
+                      variant="default" 
+                      size="sm" 
+                      onClick={handleRetry}
+                      className="gap-1 h-7 text-xs px-2"
+                    >
+                      <RefreshCw className="h-3 w-3" />
+                      Retry
+                    </Button>
+                  </div>
                 </div>
               </div>
             )}
-
-            <div className="relative z-10 space-y-2 max-w-2xl">
-              <p className="text-sm text-muted-foreground leading-relaxed">
-                Analyzing contract rules, aligning them with your billing export,<br />
-                and drafting AI insights. You can close this tab—we'll email the full Revenue Recovery Report as soon as it's ready.
-              </p>
-              <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground/70 pt-2">
-                <Lock className="h-3 w-3" />
-                <span>End-to-end encrypted</span>
-              </div>
-            </div>
 
             {/* Stage Progress Indicators */}
             <div className="w-full max-w-3xl space-y-4 relative z-10">
@@ -734,6 +1006,8 @@ const UploadPage = () => {
                               ? "bg-success/15 text-success border-2 border-success/30"
                               : "bg-muted/50 text-muted-foreground border-2 border-border/40"
                         }`}
+                        role="status"
+                        aria-label={isActive ? `Processing: ${stageLabels[stage].title}` : isDone ? `Completed: ${stageLabels[stage].title}` : `Pending: ${stageLabels[stage].title}`}
                       >
                         {isActive ? (
                           <Loader2 className="h-7 w-7 animate-spin" />
@@ -789,13 +1063,15 @@ const UploadPage = () => {
                 );
               })}
             </div>
-            <Button 
-              variant="secondary" 
-              className="gap-2 rounded-xl shadow-lg hover:shadow-xl transition-all duration-300 relative z-10" 
-              onClick={() => navigate(jobId ? `/dashboard?job=${jobId}` : "/dashboard")}
-            >
-              Go to Dashboard
-            </Button>
+            <div className="flex gap-2 relative z-10 animate-in fade-in duration-500 delay-1000">
+              <Button 
+                variant="secondary" 
+                className="gap-2 rounded-xl shadow-sm hover:shadow-md transition-all duration-300" 
+                onClick={() => navigate(jobId ? `/dashboard?job=${jobId}` : "/dashboard")}
+              >
+                Go to Dashboard
+              </Button>
+            </div>
           </div>
         )}
 
